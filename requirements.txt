@@ -1,0 +1,13 @@
+aiogram==3.13.0
+anthropic==0.40.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+pydantic==2.10.3
+redis==5.2.1
+python-dotenv==1.0.1
+yookassa==3.1.0
+python-on-whales==0.73.0
+loguru==0.7.3
+pytest==8.3.4
+pytest-asyncio==0.24.0
