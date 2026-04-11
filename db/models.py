@@ -5,6 +5,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -105,10 +106,43 @@ class Subscription(Base):
     yukassa_payment_id = Column(String(64), nullable=True, index=True)
     # pending | active | canceled | expired
     status = Column(String(32), nullable=False)
+    # Billing cycle: monthly | yearly
     plan = Column(String(32), nullable=False)
+    # Feature tier: starter | pro | business
+    tier = Column(String(32), nullable=False, default="starter")
+
+    # Token bucket. tokens_limit=NULL means unlimited (business tier).
+    tokens_limit = Column(Integer, nullable=True)
+    tokens_used = Column(Integer, nullable=False, default=0)
+    tokens_reset_at = Column(DateTime(timezone=True), nullable=True)
 
     started_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     client = relationship("Client", back_populates="subscriptions")
+
+
+class TokenLog(Base):
+    __tablename__ = "token_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    bot_id = Column(
+        Integer,
+        ForeignKey("bot_configs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    tokens_in = Column(Integer, nullable=False)
+    tokens_out = Column(Integer, nullable=False)
+    model = Column(String(64), nullable=False)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)

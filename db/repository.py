@@ -1,9 +1,23 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
-from sqlalchemy import select
+from loguru import logger
+from sqlalchemy import func, select
 
+from config import PLANS
 from db.database import get_session
-from db.models import BotConfig, Client, ConsentLog, Subscription
+from db.models import BotConfig, Client, ConsentLog, Subscription, TokenLog
+
+# OpenRouter pricing per 1M tokens (USD). Keys are the exact model slugs we
+# pass to the OpenAI SDK, so the lookup in log_tokens is a direct match. If a
+# new model is introduced, add it here — otherwise cost falls back to 0 and a
+# warning is logged.
+MODEL_PRICING_USD_PER_1M: dict[str, float] = {
+    "deepseek/deepseek-chat-v3.1": 0.28,
+    "qwen/qwen3-235b-a22b": 0.54,
+}
+
+TOKEN_RESET_PERIOD = timedelta(days=30)
 
 
 def _utcnow() -> datetime:
@@ -72,13 +86,14 @@ async def save_bot_config(
     bot_name: str,
     system_prompt: str,
     config: dict,
+    bot_token: str,
 ) -> BotConfig:
     async with get_session() as session:
         bot = BotConfig(
             client_id=client_id,
             bot_type=bot_type,
             bot_name=bot_name,
-            bot_token="",
+            bot_token=bot_token,
             system_prompt=system_prompt,
             config_json=config,
         )
@@ -102,19 +117,150 @@ async def get_client_bots(client_id: int) -> list[BotConfig]:
 
 
 async def create_subscription(
-    client_id: int, payment_id: str, plan: str
+    client_id: int,
+    payment_id: str,
+    plan: str,
+    status: str = "pending",
+    started_at: Optional[datetime] = None,
+    expires_at: Optional[datetime] = None,
+    tier: str = "starter",
+    tokens_reset_at: Optional[datetime] = None,
 ) -> Subscription:
+    if tier not in PLANS:
+        raise ValueError(f"Unknown tier: {tier}")
+    tokens_limit = PLANS[tier]["tokens_limit"]
     async with get_session() as session:
         sub = Subscription(
             client_id=client_id,
             yukassa_payment_id=payment_id,
-            status="pending",
+            status=status,
             plan=plan,
+            tier=tier,
+            tokens_limit=tokens_limit,
+            tokens_used=0,
+            tokens_reset_at=tokens_reset_at,
+            started_at=started_at,
+            expires_at=expires_at,
         )
         session.add(sub)
         await session.flush()
         session.expunge(sub)
         return sub
+
+
+def _maybe_reset_tokens(sub: Subscription, now: datetime) -> None:
+    """Zero tokens_used and advance reset_at if the period has elapsed."""
+    if sub.tokens_reset_at is None:
+        return
+    if sub.tokens_reset_at <= now:
+        sub.tokens_used = 0
+        sub.tokens_reset_at = now + TOKEN_RESET_PERIOD
+
+
+async def _active_subscription(session, client_id: int, now: datetime):
+    result = await session.execute(
+        select(Subscription)
+        .where(
+            Subscription.client_id == client_id,
+            Subscription.status == "active",
+            Subscription.expires_at > now,
+        )
+        .order_by(Subscription.expires_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def log_tokens(
+    client_id: int,
+    bot_id: Optional[int],
+    tokens_in: int,
+    tokens_out: int,
+    model: str,
+) -> None:
+    price = MODEL_PRICING_USD_PER_1M.get(model)
+    if price is None:
+        logger.warning("log_tokens: unknown model '{}' — cost set to 0", model)
+        price = 0.0
+    total = tokens_in + tokens_out
+    cost_usd = (total / 1_000_000.0) * price
+
+    async with get_session() as session:
+        session.add(
+            TokenLog(
+                client_id=client_id,
+                bot_id=bot_id,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                model=model,
+                cost_usd=cost_usd,
+            )
+        )
+        now = _utcnow()
+        sub = await _active_subscription(session, client_id, now)
+        if sub is not None:
+            _maybe_reset_tokens(sub, now)
+            sub.tokens_used = (sub.tokens_used or 0) + total
+
+
+async def get_usage_stats(client_id: int) -> dict[str, Any]:
+    async with get_session() as session:
+        now = _utcnow()
+        sub = await _active_subscription(session, client_id, now)
+
+        cost_result = await session.execute(
+            select(func.coalesce(func.sum(TokenLog.cost_usd), 0.0)).where(
+                TokenLog.client_id == client_id
+            )
+        )
+        cost_usd_total = float(cost_result.scalar_one() or 0.0)
+
+        if sub is None:
+            return {
+                "tokens_used": 0,
+                "tokens_limit": 0,
+                "tokens_left": 0,
+                "cost_usd_total": cost_usd_total,
+                "reset_at": None,
+                "tier": None,
+            }
+
+        _maybe_reset_tokens(sub, now)
+        tokens_used = sub.tokens_used or 0
+        tokens_limit = sub.tokens_limit
+        if tokens_limit is None:
+            tokens_left = None
+        else:
+            tokens_left = max(0, tokens_limit - tokens_used)
+
+        return {
+            "tokens_used": tokens_used,
+            "tokens_limit": tokens_limit,
+            "tokens_left": tokens_left,
+            "cost_usd_total": cost_usd_total,
+            "reset_at": sub.tokens_reset_at,
+            "tier": sub.tier,
+        }
+
+
+async def check_and_update_tokens(client_id: int, tokens_needed: int) -> bool:
+    async with get_session() as session:
+        now = _utcnow()
+        sub = await _active_subscription(session, client_id, now)
+        if sub is None:
+            return False
+
+        _maybe_reset_tokens(sub, now)
+
+        if sub.tokens_limit is None:
+            sub.tokens_used = (sub.tokens_used or 0) + tokens_needed
+            return True
+
+        if (sub.tokens_used or 0) + tokens_needed > sub.tokens_limit:
+            return False
+
+        sub.tokens_used = (sub.tokens_used or 0) + tokens_needed
+        return True
 
 
 async def get_active_subscription(client_id: int) -> Subscription | None:

@@ -1,21 +1,64 @@
 import os
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
-from anthropic import Anthropic
 from loguru import logger
+from openai import OpenAI
 
-MODEL = "claude-opus-4-5"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+MODEL_AGENTS = os.getenv("OPENROUTER_MODEL_AGENTS", "deepseek/deepseek-chat-v3.1")
+MODEL_BOTS = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
 MAX_TOKENS = 4096
 
-_client: Anthropic | None = None
+# Whitelist of fields allowed into LLM prompts. Anything else (telegram_id,
+# username, phone, etc.) must never reach the model — 152-ФЗ minimization.
+_ALLOWED_INPUT_KEYS = frozenset(
+    {
+        "bot_type",
+        "purpose",
+        "audience",
+        "target_audience",
+        "key_features",
+        "tone",
+    }
+)
+
+# Per-pipeline token usage accumulator. run_pipeline sets a fresh list in this
+# ContextVar; run_agent/run_bot_query append one dict per LLM call. main.py
+# reads spec.token_logs after the pipeline finishes and writes them to the DB.
+_token_accumulator: ContextVar[Optional[list[dict[str, Any]]]] = ContextVar(
+    "token_accumulator", default=None
+)
 
 
-def _get_client() -> Anthropic:
+def _record_usage(model: str, response: Any) -> None:
+    acc = _token_accumulator.get()
+    if acc is None:
+        return
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    acc.append(
+        {
+            "model": model,
+            "tokens_in": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "tokens_out": int(getattr(usage, "completion_tokens", 0) or 0),
+        }
+    )
+
+
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY env var is required")
+        _client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
     return _client
 
 
@@ -26,25 +69,36 @@ class BotSpec:
     architecture: dict[str, Any] = field(default_factory=dict)
     system_prompt: str = ""
     bot_code: str = ""
+    token_logs: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _chat(model: str, system: str, user_message: str) -> str:
+    client = _get_client()
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=MAX_TOKENS,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message},
+        ],
+    )
+    _record_usage(model, response)
+    content = response.choices[0].message.content or ""
+    return content.strip()
 
 
 def run_agent(system: str, user_message: str, context: str = "") -> str:
-    client = _get_client()
+    """LLM call for factory agents (analyst/architect/prompt_engineer/builder)."""
     if context:
         user_message = f"<context>\n{context}\n</context>\n\n{user_message}"
+    return _chat(MODEL_AGENTS, system, user_message)
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    parts = [
-        block.text
-        for block in response.content
-        if getattr(block, "type", None) == "text"
-    ]
-    return "".join(parts).strip()
+
+def run_bot_query(system: str, user_message: str, context: str = "") -> str:
+    """LLM call for generated runtime bots. Uses a cheaper/faster model tier."""
+    if context:
+        user_message = f"<context>\n{context}\n</context>\n\n{user_message}"
+    return _chat(MODEL_BOTS, system, user_message)
 
 
 # Agent imports live below run_agent to break the circular dependency:
@@ -56,9 +110,21 @@ from agents.prompt_engineer import prompt_engineer_agent  # noqa: E402
 
 
 def run_pipeline(client_answers: dict[str, Any]) -> BotSpec:
-    raw_input = str(client_answers)
+    safe_answers = {
+        k: v for k, v in client_answers.items() if k in _ALLOWED_INPUT_KEYS
+    }
+    dropped = set(client_answers) - _ALLOWED_INPUT_KEYS
+    if dropped:
+        logger.warning(
+            "pipeline: dropped non-whitelisted input keys: {}", sorted(dropped)
+        )
+
+    raw_input = str(safe_answers)
     spec = BotSpec(raw_input=raw_input)
     total_start = time.perf_counter()
+
+    token_logs: list[dict[str, Any]] = []
+    token_ctx = _token_accumulator.set(token_logs)
 
     logger.info("pipeline: start (raw_input_len={} chars)", len(raw_input))
 
@@ -99,8 +165,16 @@ def run_pipeline(client_answers: dict[str, Any]) -> BotSpec:
         len(spec.bot_code),
     )
 
+    spec.token_logs = list(token_logs)
+    _token_accumulator.reset(token_ctx)
+
+    total_in = sum(e["tokens_in"] for e in spec.token_logs)
+    total_out = sum(e["tokens_out"] for e in spec.token_logs)
     logger.info(
-        "pipeline: complete in {:.2f}s total",
+        "pipeline: complete in {:.2f}s total (tokens_in={}, tokens_out={}, calls={})",
         time.perf_counter() - total_start,
+        total_in,
+        total_out,
+        len(spec.token_logs),
     )
     return spec

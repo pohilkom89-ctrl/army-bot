@@ -15,12 +15,15 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
 - Python 3.11, aiogram 3.x (Router/Dispatcher, async/await)
 - Реализуй ВСЕ хендлеры из архитектуры (поле handlers)
 - Если в архитектуре есть states — используй aiogram.fsm (StatesGroup, FSMContext, MemoryStorage)
-- Обращения к Claude через официальный anthropic SDK (AsyncAnthropic):
-  * модель "claude-opus-4-5", max_tokens=2048
-  * передавай переданный системный промпт как параметр `system=`
+- Обращения к LLM через openai SDK поверх OpenRouter:
+  * `from openai import AsyncOpenAI`
+  * клиент: `AsyncOpenAI(api_key=os.getenv("OPENROUTER_API_KEY"), base_url="https://openrouter.ai/api/v1")`
+  * модель берётся из env: `os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")`
+  * вызов: `client.chat.completions.create(model=..., max_tokens=2048, messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_text}])`
+  * системный промпт передавай как первое сообщение с role="system"
 - Все секреты читай из окружения через os.getenv():
   * BOT_TOKEN
-  * ANTHROPIC_API_KEY
+  * OPENROUTER_API_KEY
   * Если ключа нет — падай при старте с понятной ошибкой (RuntimeError)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
