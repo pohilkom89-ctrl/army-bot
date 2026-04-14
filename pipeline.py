@@ -22,6 +22,8 @@ _ALLOWED_INPUT_KEYS = frozenset(
         "target_audience",
         "key_features",
         "tone",
+        "questionnaire_type",
+        "answers",
     }
 )
 
@@ -109,6 +111,37 @@ from agents.builder import builder_agent  # noqa: E402
 from agents.prompt_engineer import prompt_engineer_agent  # noqa: E402
 
 
+def _format_raw_input(safe_answers: dict[str, Any]) -> str:
+    """Build a human-readable block for the analyst LLM prompt.
+
+    When the intake flow delivers a `answers` dict (questionnaire-based),
+    render it as a numbered Q&A list so the analyst can reason over each
+    answer individually instead of parsing a Python repr.
+    """
+    lines: list[str] = []
+    qtype = safe_answers.get("questionnaire_type") or safe_answers.get("bot_type")
+    if qtype:
+        lines.append(f"Тип бота (выбран клиентом): {qtype}")
+
+    answers = safe_answers.get("answers")
+    if isinstance(answers, dict) and answers:
+        lines.append("\nОтветы клиента на анкету:")
+        for qid in sorted(answers.keys(), key=lambda k: int(k) if str(k).isdigit() else 0):
+            entry = answers[qid]
+            if isinstance(entry, dict):
+                q = entry.get("question", "")
+                a = entry.get("answer", "")
+                lines.append(f"Q{qid}: {q}\nA{qid}: {a}")
+            else:
+                lines.append(f"Q{qid}: {entry}")
+        return "\n".join(lines)
+
+    for key in ("purpose", "audience", "target_audience", "key_features", "tone"):
+        if key in safe_answers and safe_answers[key]:
+            lines.append(f"{key}: {safe_answers[key]}")
+    return "\n".join(lines) if lines else str(safe_answers)
+
+
 def run_pipeline(client_answers: dict[str, Any]) -> BotSpec:
     safe_answers = {
         k: v for k, v in client_answers.items() if k in _ALLOWED_INPUT_KEYS
@@ -119,7 +152,7 @@ def run_pipeline(client_answers: dict[str, Any]) -> BotSpec:
             "pipeline: dropped non-whitelisted input keys: {}", sorted(dropped)
         )
 
-    raw_input = str(safe_answers)
+    raw_input = _format_raw_input(safe_answers)
     spec = BotSpec(raw_input=raw_input)
     total_start = time.perf_counter()
 

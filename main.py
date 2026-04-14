@@ -31,6 +31,7 @@ from db.repository import (
     save_consent,
 )
 from pipeline import run_pipeline
+from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
 
 BOTS_DIR = Path("bots")
@@ -46,10 +47,27 @@ CONSENT_TEXT = """Для создания бота мы обрабатываем
 class IntakeStates(StatesGroup):
     consent = State()
     ask_type = State()
-    ask_purpose = State()
-    ask_audience = State()
+    answering = State()
     ask_bot_token = State()
     processing = State()
+
+
+def _bot_type_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{spec['name']} — {spec['description']}",
+                callback_data=f"btype:{key}",
+            )
+        ]
+        for key, spec in QUESTIONNAIRES.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_question(q: dict, idx: int, total: int) -> str:
+    hint = f"\n💡 {q['hint']}" if q.get("hint") else ""
+    return f"Вопрос {idx}/{total}\n\n{q['text']}{hint}"
 
 
 router = Router()
@@ -101,8 +119,12 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
     logger.info("intake: consent saved for tg_id={}", user.id)
     await state.set_state(IntakeStates.ask_type)
     await message.answer(
-        "Какой бот нужен? (парсер / контент / продажи / другое)",
+        "Выберите тип бота:",
         reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer(
+        "Что именно вам нужно?",
+        reply_markup=_bot_type_keyboard(),
     )
 
 
@@ -115,25 +137,63 @@ async def on_consent_no(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(IntakeStates.ask_type)
-async def on_type(message: Message, state: FSMContext) -> None:
-    await state.update_data(bot_type=(message.text or "").strip())
-    await state.set_state(IntakeStates.ask_purpose)
-    await message.answer("Опиши задачу бота в 2-3 предложениях.")
+@router.callback_query(IntakeStates.ask_type, F.data.startswith("btype:"))
+async def on_bot_type_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    key = (callback.data or "").split(":", 1)[1]
+    if key not in QUESTIONNAIRES:
+        await callback.answer("Неизвестный тип", show_alert=True)
+        return
+
+    spec = QUESTIONNAIRES[key]
+    questions = spec["questions"]
+    await state.update_data(
+        bot_type=key,
+        questionnaire_type=key,
+        answers={},
+        current_q=0,
+        total_q=len(questions),
+    )
+    await state.set_state(IntakeStates.answering)
+
+    if callback.message is not None:
+        await callback.message.answer(
+            f"Отлично, собираем «{spec['name']}». "
+            f"Задам {len(questions)} вопросов — отвечайте коротко и по делу."
+        )
+        first_q = questions[0]
+        await callback.message.answer(_format_question(first_q, 1, len(questions)))
+    await callback.answer()
 
 
-@router.message(IntakeStates.ask_purpose)
-async def on_purpose(message: Message, state: FSMContext) -> None:
-    await state.update_data(purpose=(message.text or "").strip())
-    await state.set_state(IntakeStates.ask_audience)
-    await message.answer("Кто будет им пользоваться?")
+@router.message(IntakeStates.answering)
+async def on_answer(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    bot_type = data.get("bot_type")
+    questions = QUESTIONNAIRES[bot_type]["questions"]
+    idx = data.get("current_q", 0)
 
+    current_q = questions[idx]
+    answer_text = (message.text or "").strip()
+    answers = dict(data.get("answers") or {})
+    answers[str(current_q["id"])] = {
+        "question": current_q["text"],
+        "answer": answer_text,
+        "sensitive": is_sensitive_question(current_q["text"]),
+    }
 
-@router.message(IntakeStates.ask_audience)
-async def on_audience(message: Message, state: FSMContext) -> None:
-    await state.update_data(audience=(message.text or "").strip())
+    next_idx = idx + 1
+    await state.update_data(answers=answers, current_q=next_idx)
+
+    if next_idx < len(questions):
+        next_q = questions[next_idx]
+        await message.answer(
+            _format_question(next_q, next_idx + 1, len(questions))
+        )
+        return
+
     await state.set_state(IntakeStates.ask_bot_token)
     await message.answer(
+        "Отлично, все вопросы собраны!\n\n"
         "Теперь создайте бота у @BotFather командой /newbot, "
         "получите токен и отправьте его сюда."
     )
@@ -156,33 +216,63 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    answers = {
-        "bot_type": data.get("bot_type"),
-        "purpose": data.get("purpose"),
-        "audience": data.get("audience"),
+    bot_type = data.get("bot_type")
+    raw_answers: dict = data.get("answers") or {}
+
+    # Defense-in-depth: strip sensitive answer *values* (API tokens, keys)
+    # before they reach the LLM. Question text is preserved so the analyst
+    # can mark the secret as "provided" via a placeholder flag.
+    llm_answers = {}
+    sensitive_count = 0
+    for qid, entry in raw_answers.items():
+        if entry.get("sensitive") and entry.get("answer"):
+            sensitive_count += 1
+            llm_answers[qid] = {
+                "question": entry["question"],
+                "answer": "<user provided secret, redacted>",
+            }
+        else:
+            llm_answers[qid] = {
+                "question": entry["question"],
+                "answer": entry.get("answer", ""),
+            }
+
+    pipeline_input = {
+        "bot_type": bot_type,
+        "questionnaire_type": bot_type,
+        "answers": llm_answers,
     }
 
     await state.set_state(IntakeStates.processing)
     await message.answer("Агенты приступили к работе, ожидайте ~60 секунд...")
 
-    logger.info("intake: pipeline launched for tg_id={} answers={}", user.id, answers)
+    logger.info(
+        "intake: pipeline launched for tg_id={} bot_type={} q_count={} sensitive={}",
+        user.id,
+        bot_type,
+        len(llm_answers),
+        sensitive_count,
+    )
     try:
-        spec = await asyncio.to_thread(run_pipeline, answers)
+        spec = await asyncio.to_thread(run_pipeline, pipeline_input)
 
         client = await get_or_create_client(user.id, user.username)
         bot_dir = BOTS_DIR / str(client.id)
         bot_dir.mkdir(parents=True, exist_ok=True)
         (bot_dir / "main.py").write_text(spec.bot_code, encoding="utf-8")
 
-        bot_type = spec.requirements.get("bot_type", "other")
+        resolved_type = spec.requirements.get("bot_type", bot_type or "other")
         saved_bot = await save_bot_config(
             client_id=client.id,
-            bot_type=bot_type,
+            bot_type=resolved_type,
             bot_name=f"bot_{client.id}",
             system_prompt=spec.system_prompt,
             config={
                 "requirements": spec.requirements,
                 "architecture": spec.architecture,
+                # Raw questionnaire answers with unredacted secrets.
+                # Stored only in DB, never passed to LLM.
+                "questionnaire_answers": raw_answers,
             },
             bot_token=bot_token,
         )
@@ -206,7 +296,7 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         len(spec.bot_code),
     )
     await message.answer(
-        f"✅ Бот готов!\n\nТип: {bot_type}\nФайл сохранён.\n\n"
+        f"✅ Бот готов!\n\nТип: {resolved_type}\nФайл сохранён.\n\n"
         "Для запуска оформите подписку /subscribe"
     )
     await state.clear()

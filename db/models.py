@@ -61,7 +61,7 @@ class BotConfig(Base):
     )
 
     bot_name = Column(String(128), nullable=False)
-    # parser | content | sales | other
+    # parser | seller | content | support
     bot_type = Column(String(32), nullable=False)
     bot_token = Column(String(128), nullable=False)
     system_prompt = Column(Text, nullable=False)
