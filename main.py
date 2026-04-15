@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -498,7 +498,8 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env var is required")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+storage = RedisStorage.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+dp = Dispatcher(storage=storage)
 dp.include_router(router)
 
 
