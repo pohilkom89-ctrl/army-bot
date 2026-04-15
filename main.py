@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -804,13 +805,59 @@ dp.include_router(router)
 
 
 async def main():
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def _request_shutdown() -> None:
+        if not shutdown_event.is_set():
+            logger.info("shutdown: signal received")
+            shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            # Windows event loop does not implement add_signal_handler.
+            # Local dev on Windows falls back to KeyboardInterrupt.
+            pass
+
     await init_db()
     logger.info("База данных инициализирована")
     logger.info("Бот запущен")
-    await asyncio.gather(
-        dp.start_polling(bot),
-        start_webhook_server(),
+
+    polling_task = asyncio.create_task(
+        dp.start_polling(bot), name="polling"
     )
+    webhook_task = asyncio.create_task(
+        start_webhook_server(), name="webhook"
+    )
+    shutdown_task = asyncio.create_task(
+        shutdown_event.wait(), name="shutdown"
+    )
+
+    await asyncio.wait(
+        {polling_task, webhook_task, shutdown_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    logger.info("shutdown: stopping polling")
+    try:
+        await dp.stop_polling()
+    except Exception:
+        logger.exception("shutdown: dp.stop_polling raised")
+
+    for task in (polling_task, webhook_task, shutdown_task):
+        if not task.done():
+            task.cancel()
+    for task in (polling_task, webhook_task, shutdown_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("shutdown: task raised during cancel")
+
+    logger.info("shutdown: complete")
 
 
 if __name__ == "__main__":
