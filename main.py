@@ -338,13 +338,37 @@ def _format_ru_date(dt) -> str:
     return f"{dt.day} {_RU_MONTHS[dt.month - 1]} {dt.year}"
 
 
-def _progress_bar(left: int, limit: int, width: int = 10) -> tuple[str, int]:
+def _progress_bar_used(
+    used: int, limit: int, width: int = 10
+) -> tuple[str, int]:
+    """Bar filled in proportion to used/limit. pct is % used."""
     if limit <= 0:
         return "░" * width, 0
-    ratio = max(0.0, min(1.0, left / limit))
+    ratio = max(0.0, min(1.0, used / limit))
     filled = round(width * ratio)
     pct = round(100 * ratio)
     return "█" * filled + "░" * (width - filled), pct
+
+
+def _upgrade_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Апгрейд тарифа ↗",
+                    callback_data="usage:upgrade",
+                )
+            ]
+        ]
+    )
+
+
+async def _active_bot_name(client_id: int) -> str:
+    bots = await get_client_bots(client_id)
+    active = [b for b in bots if b.is_active]
+    if not active:
+        return "не создан"
+    return active[0].bot_name
 
 
 @router.message(Command("usage"))
@@ -355,6 +379,7 @@ async def cmd_usage(message: Message) -> None:
 
     client = await get_or_create_client(user.id, user.username)
     stats = await get_usage_stats(client.id)
+    bot_name = await _active_bot_name(client.id)
 
     used = stats["tokens_used"]
     limit = stats["tokens_limit"]
@@ -363,39 +388,56 @@ async def cmd_usage(message: Message) -> None:
     tier = stats["tier"]
 
     reset_str = _format_ru_date(reset_at) if reset_at is not None else "—"
-    tier_label = PLANS[tier]["name"] if tier in PLANS else "нет"
 
     if tier is None:
         await message.answer(
-            "📊 Использование токенов:\n\n"
+            "📊 Использование токенов\n\n"
+            f"Бот: {bot_name}\n"
+            "Тариф: нет активной подписки\n\n"
             f"Использовано: {_format_num(used)}\n"
             f"Потрачено: ${cost:.2f}\n\n"
-            "У вас нет активной подписки → /subscribe"
+            "Оформите подписку → /subscribe",
+            reply_markup=_upgrade_keyboard(),
         )
         return
 
-    if limit is None:
+    tier_label = PLANS[tier]["name"] if tier in PLANS else tier
+    is_business = limit is None
+
+    if is_business:
         await message.answer(
-            "📊 Использование токенов:\n\n"
-            f"Использовано: {_format_num(used)}\n"
-            "Осталось: ∞\n\n"
-            f"Сброс: {reset_str}\n"
-            f"Потрачено: ${cost:.2f}\n\n"
-            f"Тариф: {tier_label} (безлимит)"
+            "📊 Использование токенов\n\n"
+            f"Бот: {bot_name}\n"
+            f"Тариф: {tier_label}\n\n"
+            "██████████ ∞ безлимит\n"
+            f"Использовано: {_format_num(used)}\n\n"
+            f"Потрачено: ${cost:.2f}\n"
+            f"Сброс: {reset_str}"
         )
         return
 
     tokens_left = max(0, limit - used)
-    bar, pct = _progress_bar(tokens_left, limit)
-    await message.answer(
-        "📊 Использование токенов:\n\n"
+    bar, pct_used = _progress_bar_used(used, limit)
+    text = (
+        "📊 Использование токенов\n\n"
+        f"Бот: {bot_name}\n"
+        f"Тариф: {tier_label}\n\n"
+        f"{bar} {pct_used}% использовано\n"
         f"Использовано: {_format_num(used)} / {_format_num(limit)}\n"
-        f"Осталось: {_format_num(tokens_left)} ({pct}%)\n"
-        f"Прогресс: {bar} {pct}%\n\n"
-        f"Сброс: {reset_str}\n"
-        f"Потрачено: ${cost:.2f}\n\n"
-        f"Тариф: {tier_label} → /subscribe для апгрейда"
+        f"Осталось: {_format_num(tokens_left)} токенов\n\n"
+        f"Потрачено: ${cost:.2f}\n"
+        f"Сброс: {reset_str}"
     )
+    await message.answer(text, reply_markup=_upgrade_keyboard())
+
+
+@router.callback_query(F.data == "usage:upgrade")
+async def cb_usage_upgrade(callback: CallbackQuery) -> None:
+    if callback.message is not None:
+        await callback.message.answer(
+            "Выберите тариф подписки:", reply_markup=_subscribe_keyboard()
+        )
+    await callback.answer()
 
 
 _TIER_ORDER = ("starter", "pro", "business")
@@ -494,6 +536,33 @@ async def on_subscribe_choice(callback: CallbackQuery) -> None:
 
 CHAT_HISTORY_LIMIT = 10
 LOW_TOKENS_THRESHOLD = 0.2
+CRITICAL_TOKENS_THRESHOLD = 0.1
+
+
+def _tokens_left_fraction(stats: dict) -> float | None:
+    """Fraction of tokens remaining (0.0-1.0). None means unlimited."""
+    limit = stats.get("tokens_limit")
+    if limit is None or limit <= 0:
+        return None
+    used = stats.get("tokens_used") or 0
+    return max(0.0, (limit - used) / limit)
+
+
+def _check_chat_allowed(stats: dict) -> tuple[bool, str | None]:
+    """Return (allowed, reason). When allowed is False, reason is the user
+    message explaining why the chat call is blocked."""
+    tier = stats.get("tier")
+    if tier is None:
+        return False, (
+            "🔒 У вас нет активной подписки. /subscribe для доступа к чату"
+        )
+    limit = stats.get("tokens_limit")
+    if limit is None:
+        return True, None
+    used = stats.get("tokens_used") or 0
+    if used >= limit:
+        return False, "🔒 Токены закончились. /subscribe для продолжения"
+    return True, None
 
 
 async def _enter_chat_session(
@@ -517,6 +586,17 @@ async def _enter_chat_session(
         f"Вы в режиме чата с ботом {bot_cfg.bot_name}.\n"
         f"Отправляйте сообщения. /exit чтобы выйти."
     )
+
+    stats = await get_usage_stats(client_id)
+    frac = _tokens_left_fraction(stats)
+    if frac is not None and frac < LOW_TOKENS_THRESHOLD:
+        limit = stats["tokens_limit"]
+        used = stats["tokens_used"] or 0
+        left = max(0, limit - used)
+        await answer(
+            f"⚠️ У вас осталось мало токенов ({_format_num(left)}).\n"
+            "Для бесперебойной работы рекомендуем апгрейд → /subscribe"
+        )
 
 
 @router.message(Command("chat"))
@@ -585,10 +665,22 @@ def _format_tokens_footer(stats: dict) -> str:
     if limit is None:
         return "\n\n💬 Осталось: ∞ (безлимит)"
     left = max(0, limit - used)
-    footer = f"\n\n💬 Осталось: {_format_num(left)} токенов"
-    if limit > 0 and left < limit * LOW_TOKENS_THRESHOLD:
-        footer += "\n⚠️ Токены заканчиваются — /subscribe для апгрейда"
-    return footer
+    left_fmt = _format_num(left)
+    if left == 0:
+        return "\n\n🔒 Токены закончились. /subscribe для продолжения"
+    frac = left / limit if limit > 0 else 0.0
+    if frac < CRITICAL_TOKENS_THRESHOLD:
+        return (
+            f"\n\n🔴 Критично: осталось {left_fmt} токенов! "
+            "Пополните → /subscribe"
+        )
+    if frac < LOW_TOKENS_THRESHOLD:
+        pct = round(frac * 100)
+        return (
+            f"\n\n⚠️ Осталось: {left_fmt} токенов ({pct}%). "
+            "Скоро закончатся → /subscribe"
+        )
+    return f"\n\n💬 Осталось: {left_fmt} токенов"
 
 
 @router.message(InlineChatStates.chatting)
@@ -619,6 +711,12 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Бот больше не активен. /chat чтобы выбрать другой."
         )
+        return
+
+    stats_before = await get_usage_stats(client.id)
+    allowed, reason = _check_chat_allowed(stats_before)
+    if not allowed:
+        await message.answer(reason or "Чат сейчас недоступен.")
         return
 
     history = await get_chat_history(
