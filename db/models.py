@@ -12,9 +12,12 @@ from sqlalchemy import (
     String,
     Text,
 )
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+EMBEDDING_DIM = 1536
 
 
 def utcnow() -> datetime:
@@ -121,6 +124,31 @@ class Subscription(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     client = relationship("Client", back_populates="subscriptions")
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    bot_id = Column(
+        Integer,
+        ForeignKey("bot_configs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=False)
+    source = Column(String(256), nullable=True)
+    chunk_index = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class ChatHistory(Base):

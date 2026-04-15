@@ -35,6 +35,7 @@ from db.repository import (
     save_consent,
 )
 from pipeline import _token_accumulator, run_bot_query, run_pipeline
+from services.rag import search_knowledge
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
 
@@ -538,6 +539,7 @@ async def on_subscribe_choice(callback: CallbackQuery) -> None:
 CHAT_HISTORY_LIMIT = 10
 LOW_TOKENS_THRESHOLD = 0.2
 CRITICAL_TOKENS_THRESHOLD = 0.1
+RAG_TOP_K = 3
 
 
 def _tokens_left_fraction(stats: dict) -> float | None:
@@ -729,11 +731,35 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
         context_lines.append(f"{prefix}: {h['content']}")
     context_str = "\n".join(context_lines)
 
+    # Retrieval-augmented: pull up to 3 relevant knowledge chunks and inline
+    # them into the system prompt. Failure to search (embeddings API down,
+    # pgvector missing) must not break the chat — log and continue without.
+    try:
+        rag_chunks = await search_knowledge(
+            client.id, bot_id, text, limit=RAG_TOP_K
+        )
+    except Exception:
+        logger.exception(
+            "chat: RAG search failed, continuing without kb "
+            "(client_id={} bot_id={})",
+            client.id,
+            bot_id,
+        )
+        rag_chunks = []
+
+    system_prompt = bot_cfg.system_prompt
+    if rag_chunks:
+        kb_block = "\n".join(f"- {c}" for c in rag_chunks)
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"Релевантная информация из базы знаний:\n{kb_block}"
+        )
+
     token_logs: list = []
     token_ctx = _token_accumulator.set(token_logs)
     try:
         reply = await asyncio.to_thread(
-            run_bot_query, bot_cfg.system_prompt, text, context_str
+            run_bot_query, system_prompt, text, context_str
         )
     except Exception:
         logger.exception(
