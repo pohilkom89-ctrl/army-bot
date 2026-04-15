@@ -6,7 +6,14 @@ from sqlalchemy import func, select
 
 from config import PLANS
 from db.database import get_session
-from db.models import BotConfig, Client, ConsentLog, Subscription, TokenLog
+from db.models import (
+    BotConfig,
+    ChatHistory,
+    Client,
+    ConsentLog,
+    Subscription,
+    TokenLog,
+)
 
 # OpenRouter pricing per 1M tokens (USD). Keys are the exact model slugs we
 # pass to the OpenAI SDK, so the lookup in log_tokens is a direct match. If a
@@ -261,6 +268,48 @@ async def check_and_update_tokens(client_id: int, tokens_needed: int) -> bool:
 
         sub.tokens_used = (sub.tokens_used or 0) + tokens_needed
         return True
+
+
+async def save_chat_message(
+    client_id: int,
+    bot_id: int,
+    role: str,
+    content: str,
+    tokens: int = 0,
+) -> None:
+    if role not in ("user", "assistant"):
+        raise ValueError(f"Unknown chat role: {role}")
+    async with get_session() as session:
+        session.add(
+            ChatHistory(
+                client_id=client_id,
+                bot_id=bot_id,
+                role=role,
+                content=content,
+                tokens_used=tokens,
+            )
+        )
+
+
+async def get_chat_history(
+    client_id: int, bot_id: int, limit: int = 10
+) -> list[dict[str, Any]]:
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatHistory)
+            .where(
+                ChatHistory.client_id == client_id,
+                ChatHistory.bot_id == bot_id,
+            )
+            .order_by(ChatHistory.created_at.desc())
+            .limit(limit)
+        )
+        rows = list(result.scalars().all())
+    rows.reverse()
+    return [
+        {"role": r.role, "content": r.content, "created_at": r.created_at}
+        for r in rows
+    ]
 
 
 async def get_active_subscription(client_id: int) -> Subscription | None:

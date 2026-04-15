@@ -24,13 +24,16 @@ from config import PLANS
 from db.database import get_session, init_db  # noqa: F401
 from db.repository import (
     anonymize_user,
+    get_chat_history,
+    get_client_bots,
     get_or_create_client,
     get_usage_stats,
     log_tokens,
     save_bot_config,
+    save_chat_message,
     save_consent,
 )
-from pipeline import run_pipeline
+from pipeline import _token_accumulator, run_bot_query, run_pipeline
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
 
@@ -50,6 +53,10 @@ class IntakeStates(StatesGroup):
     answering = State()
     ask_bot_token = State()
     processing = State()
+
+
+class InlineChatStates(StatesGroup):
+    chatting = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -295,9 +302,24 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         client.id,
         len(spec.bot_code),
     )
+    post_create_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Начать чат", callback_data="post_create:chat"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 Управление", callback_data="post_create:mybots"
+                )
+            ],
+        ]
+    )
     await message.answer(
         f"✅ Бот готов!\n\nТип: {resolved_type}\nФайл сохранён.\n\n"
-        "Для запуска оформите подписку /subscribe"
+        "Для запуска оформите подписку /subscribe",
+        reply_markup=post_create_kb,
     )
     await state.clear()
 
@@ -468,6 +490,186 @@ async def on_subscribe_choice(callback: CallbackQuery) -> None:
             f"Оплатите подписку по ссылке:\n{payment_url}"
         )
     await callback.answer()
+
+
+CHAT_HISTORY_LIMIT = 10
+LOW_TOKENS_THRESHOLD = 0.2
+
+
+async def _enter_chat_session(
+    client_id: int, state: FSMContext, answer
+) -> None:
+    bots = await get_client_bots(client_id)
+    active_bots = [b for b in bots if b.is_active]
+    if not active_bots:
+        await answer(
+            "У вас нет активного бота. Создайте его командой /start"
+        )
+        await state.clear()
+        return
+
+    bot_cfg = active_bots[0]
+    await state.set_state(InlineChatStates.chatting)
+    await state.update_data(
+        chat_bot_id=bot_cfg.id, chat_bot_name=bot_cfg.bot_name
+    )
+    await answer(
+        f"Вы в режиме чата с ботом {bot_cfg.bot_name}.\n"
+        f"Отправляйте сообщения. /exit чтобы выйти."
+    )
+
+
+@router.message(Command("chat"))
+async def cmd_chat(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    await _enter_chat_session(client.id, state, message.answer)
+
+
+@router.callback_query(F.data == "post_create:chat")
+async def cb_post_create_chat(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    user = callback.from_user
+    if user is None or callback.message is None:
+        await callback.answer()
+        return
+    client = await get_or_create_client(user.id, user.username)
+    await _enter_chat_session(client.id, state, callback.message.answer)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "post_create:mybots")
+async def cb_post_create_mybots(callback: CallbackQuery) -> None:
+    if callback.message is not None:
+        await callback.message.answer(
+            "Управление ботами: /mybots"
+        )
+    await callback.answer()
+
+
+@router.message(Command("mybots"))
+async def cmd_mybots(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bots = await get_client_bots(client.id)
+    if not bots:
+        await message.answer(
+            "У вас нет ботов. Создайте бота командой /start"
+        )
+        return
+    lines = ["🤖 Ваши боты:\n"]
+    for b in bots:
+        status = "✅" if b.is_active else "⏸"
+        lines.append(f"{status} {b.bot_name} — {b.bot_type}")
+    lines.append("\n/chat — общаться с активным ботом")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("exit"), InlineChatStates.chatting)
+async def cmd_exit_chat(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Вы вышли из режима чата. /chat чтобы вернуться.")
+
+
+def _format_tokens_footer(stats: dict) -> str:
+    tier = stats.get("tier")
+    if tier is None:
+        return ""
+    limit = stats.get("tokens_limit")
+    used = stats.get("tokens_used") or 0
+    if limit is None:
+        return "\n\n💬 Осталось: ∞ (безлимит)"
+    left = max(0, limit - used)
+    footer = f"\n\n💬 Осталось: {_format_num(left)} токенов"
+    if limit > 0 and left < limit * LOW_TOKENS_THRESHOLD:
+        footer += "\n⚠️ Токены заканчиваются — /subscribe для апгрейда"
+    return footer
+
+
+@router.message(InlineChatStates.chatting)
+async def on_chat_message(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    data = await state.get_data()
+    bot_id = data.get("chat_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer(
+            "Сессия потеряна. /chat чтобы начать заново."
+        )
+        return
+
+    client = await get_or_create_client(user.id, user.username)
+    bots = await get_client_bots(client.id)
+    bot_cfg = next(
+        (b for b in bots if b.id == bot_id and b.is_active), None
+    )
+    if bot_cfg is None:
+        await state.clear()
+        await message.answer(
+            "Бот больше не активен. /chat чтобы выбрать другой."
+        )
+        return
+
+    history = await get_chat_history(
+        client.id, bot_id, limit=CHAT_HISTORY_LIMIT
+    )
+    context_lines = []
+    for h in history:
+        prefix = "Клиент" if h["role"] == "user" else "Бот"
+        context_lines.append(f"{prefix}: {h['content']}")
+    context_str = "\n".join(context_lines)
+
+    token_logs: list = []
+    token_ctx = _token_accumulator.set(token_logs)
+    try:
+        reply = await asyncio.to_thread(
+            run_bot_query, bot_cfg.system_prompt, text, context_str
+        )
+    except Exception:
+        logger.exception(
+            "chat: run_bot_query failed client_id={} bot_id={}",
+            client.id,
+            bot_id,
+        )
+        await message.answer(
+            "Что-то пошло не так. Попробуйте ещё раз или /exit."
+        )
+        return
+    finally:
+        _token_accumulator.reset(token_ctx)
+
+    tokens_total = sum(
+        e["tokens_in"] + e["tokens_out"] for e in token_logs
+    )
+    for entry in token_logs:
+        await log_tokens(
+            client_id=client.id,
+            bot_id=bot_id,
+            tokens_in=entry["tokens_in"],
+            tokens_out=entry["tokens_out"],
+            model=entry["model"],
+        )
+
+    await save_chat_message(client.id, bot_id, "user", text, 0)
+    await save_chat_message(
+        client.id, bot_id, "assistant", reply, tokens_total
+    )
+
+    stats = await get_usage_stats(client.id)
+    footer = _format_tokens_footer(stats)
+
+    await message.answer(reply + footer)
 
 
 @router.message(Command("delete_my_data"))

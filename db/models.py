@@ -123,6 +123,31 @@ class Subscription(Base):
     client = relationship("Client", back_populates="subscriptions")
 
 
+class ChatHistory(Base):
+    __tablename__ = "chat_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    bot_id = Column(
+        Integer,
+        ForeignKey("bot_configs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # user | assistant
+    role = Column(String(16), nullable=False)
+    content = Column(Text, nullable=False)
+    tokens_used = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class TokenLog(Base):
     __tablename__ = "token_logs"
 
