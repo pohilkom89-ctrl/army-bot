@@ -222,3 +222,73 @@ async def search_knowledge(
         len(query),
     )
     return rows
+
+
+async def count_knowledge(
+    client_id: int, bot_id: int | None = None
+) -> int:
+    if bot_id is not None:
+        sql = (
+            "SELECT COUNT(*) FROM knowledge_chunks "
+            "WHERE client_id = :cid AND (bot_id = :bid OR bot_id IS NULL)"
+        )
+        params = {"cid": client_id, "bid": bot_id}
+    else:
+        sql = "SELECT COUNT(*) FROM knowledge_chunks WHERE client_id = :cid"
+        params = {"cid": client_id}
+    async with get_session() as session:
+        result = await session.execute(text(sql), params)
+        return int(result.scalar() or 0)
+
+
+async def list_knowledge_sources(
+    client_id: int, bot_id: int | None = None
+) -> list[tuple[str, int]]:
+    """Return [(source, chunk_count), ...] sorted by chunk_count desc."""
+    if bot_id is not None:
+        sql = (
+            "SELECT COALESCE(source, '(без названия)') AS src, COUNT(*) AS n "
+            "FROM knowledge_chunks "
+            "WHERE client_id = :cid AND (bot_id = :bid OR bot_id IS NULL) "
+            "GROUP BY src ORDER BY n DESC"
+        )
+        params = {"cid": client_id, "bid": bot_id}
+    else:
+        sql = (
+            "SELECT COALESCE(source, '(без названия)') AS src, COUNT(*) AS n "
+            "FROM knowledge_chunks "
+            "WHERE client_id = :cid "
+            "GROUP BY src ORDER BY n DESC"
+        )
+        params = {"cid": client_id}
+    async with get_session() as session:
+        result = await session.execute(text(sql), params)
+        return [(row[0], int(row[1])) for row in result.all()]
+
+
+async def clear_knowledge(
+    client_id: int, bot_id: int | None = None
+) -> int:
+    """Delete all knowledge chunks for the client (scoped by bot if given).
+
+    Returns the number of rows deleted.
+    """
+    if bot_id is not None:
+        sql = (
+            "DELETE FROM knowledge_chunks "
+            "WHERE client_id = :cid AND (bot_id = :bid OR bot_id IS NULL)"
+        )
+        params = {"cid": client_id, "bid": bot_id}
+    else:
+        sql = "DELETE FROM knowledge_chunks WHERE client_id = :cid"
+        params = {"cid": client_id}
+    async with get_session() as session:
+        result = await session.execute(text(sql), params)
+        deleted = int(result.rowcount or 0)
+    logger.info(
+        "rag.clear_knowledge: deleted {} chunks (client_id={}, bot_id={})",
+        deleted,
+        client_id,
+        bot_id,
+    )
+    return deleted

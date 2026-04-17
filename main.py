@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+from io import BytesIO
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -35,7 +36,13 @@ from db.repository import (
     save_consent,
 )
 from pipeline import _token_accumulator, run_bot_query, run_pipeline
-from services.rag import search_knowledge
+from services.rag import (
+    add_knowledge,
+    clear_knowledge,
+    count_knowledge,
+    list_knowledge_sources,
+    search_knowledge,
+)
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
 
@@ -59,6 +66,10 @@ class IntakeStates(StatesGroup):
 
 class InlineChatStates(StatesGroup):
     chatting = State()
+
+
+class TeachStates(StatesGroup):
+    receiving = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -795,6 +806,249 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
     footer = _format_tokens_footer(stats)
 
     await message.answer(reply + footer)
+
+
+TEACH_MAX_FILE_BYTES = 10 * 1024 * 1024
+
+
+def _extract_pdf_text(raw: bytes) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(BytesIO(raw))
+    parts: list[str] = []
+    for page in reader.pages:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return "\n".join(parts).strip()
+
+
+async def _active_bot(client_id: int):
+    bots = await get_client_bots(client_id)
+    active = [b for b in bots if b.is_active]
+    return active[0] if active else None
+
+
+@router.message(Command("teach"))
+async def cmd_teach(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await _active_bot(client.id)
+    if bot_cfg is None:
+        await message.answer(
+            "У вас нет активного бота. Создайте его командой /start"
+        )
+        return
+    await state.set_state(TeachStates.receiving)
+    await state.update_data(teach_bot_id=bot_cfg.id)
+    await message.answer(
+        "📚 Загрузите знания для вашего бота.\n"
+        "Пришлите:\n"
+        "• Текстовое сообщение (просто напишите)\n"
+        "• PDF файл\n"
+        "• TXT файл\n"
+        "Бот будет использовать эту информацию при ответах.\n"
+        "/done когда закончите."
+    )
+
+
+@router.message(Command("done"), TeachStates.receiving)
+async def cmd_teach_done(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Готово! Ваш бот теперь использует эти знания в чате /chat"
+    )
+
+
+@router.message(TeachStates.receiving)
+async def on_teach_message(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    data = await state.get_data()
+    bot_id = data.get("teach_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия обучения потеряна. /teach чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+
+    raw_text = ""
+    source = "text"
+
+    if message.document is not None:
+        doc = message.document
+        fname = (doc.file_name or "file").strip()
+        if doc.file_size and doc.file_size > TEACH_MAX_FILE_BYTES:
+            mb = doc.file_size // (1024 * 1024)
+            await message.answer(
+                f"Файл слишком большой ({mb} MB). Лимит — 10 MB."
+            )
+            return
+        source = fname[:256]
+        buf = BytesIO()
+        try:
+            await bot.download(doc, destination=buf)
+        except Exception:
+            logger.exception("teach: download failed file_id={}", doc.file_id)
+            await message.answer("Не удалось скачать файл. Попробуйте ещё раз.")
+            return
+        raw_bytes = buf.getvalue()
+        lname = fname.lower()
+        mime = (doc.mime_type or "").lower()
+        if lname.endswith(".pdf") or mime == "application/pdf":
+            try:
+                raw_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
+            except Exception:
+                logger.exception("teach: PDF parse failed fname={}", fname)
+                await message.answer("Не удалось прочитать PDF. Проверьте файл.")
+                return
+        elif lname.endswith(".txt") or mime.startswith("text/"):
+            try:
+                raw_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    raw_text = raw_bytes.decode("cp1251")
+                except UnicodeDecodeError:
+                    await message.answer("Не удалось декодировать TXT файл.")
+                    return
+        else:
+            await message.answer("Поддерживаются только PDF и TXT файлы.")
+            return
+    elif message.text:
+        raw_text = message.text
+        source = "text"
+    else:
+        await message.answer(
+            "Пришлите текстовое сообщение, PDF или TXT. /done чтобы выйти."
+        )
+        return
+
+    raw_text = raw_text.strip()
+    if not raw_text:
+        await message.answer("Текст пустой — нечего добавлять.")
+        return
+
+    try:
+        added = await add_knowledge(client.id, bot_id, raw_text, source)
+    except Exception:
+        logger.exception(
+            "teach: add_knowledge failed client_id={} source={}",
+            client.id,
+            source,
+        )
+        await message.answer(
+            "Не удалось добавить в базу знаний. Попробуйте позже."
+        )
+        return
+
+    if added == 0:
+        await message.answer(
+            "Не удалось разбить текст на фрагменты. Попробуйте ещё раз."
+        )
+        return
+
+    total = await count_knowledge(client.id, bot_id)
+    await message.answer(
+        f"✅ Добавлено в базу знаний ({added} фрагментов).\n"
+        f"Всего в базе: {total} фрагментов. Отправьте ещё или /done"
+    )
+
+
+@router.message(Command("knowledge"))
+async def cmd_knowledge(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await _active_bot(client.id)
+    if bot_cfg is None:
+        await message.answer(
+            "У вас нет активного бота. Создайте его командой /start"
+        )
+        return
+    sources = await list_knowledge_sources(client.id, bot_cfg.id)
+    if not sources:
+        await message.answer(
+            "📚 База знаний пуста.\n/teach чтобы добавить знания."
+        )
+        return
+    total = sum(n for _, n in sources)
+    lines = [f"📚 База знаний (бот: {bot_cfg.bot_name})\n"]
+    for src, n in sources:
+        lines.append(f"• {src} — {n} фрагментов")
+    lines.append(f"\nВсего: {total} фрагментов")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Очистить базу знаний",
+                    callback_data="kb:clear:ask",
+                )
+            ]
+        ]
+    )
+    await message.answer("\n".join(lines), reply_markup=kb)
+
+
+@router.callback_query(F.data == "kb:clear:ask")
+async def cb_kb_clear_ask(callback: CallbackQuery) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, удалить всё", callback_data="kb:clear:yes"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отмена", callback_data="kb:clear:no"
+                )
+            ],
+        ]
+    )
+    await callback.message.answer(
+        "Удалить всю базу знаний? Действие необратимо.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "kb:clear:no")
+async def cb_kb_clear_no(callback: CallbackQuery) -> None:
+    if callback.message is not None:
+        await callback.message.answer("Отменено.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "kb:clear:yes")
+async def cb_kb_clear_yes(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None or callback.message is None:
+        await callback.answer()
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await _active_bot(client.id)
+    bot_id = bot_cfg.id if bot_cfg else None
+    try:
+        deleted = await clear_knowledge(client.id, bot_id)
+    except Exception:
+        logger.exception(
+            "kb: clear_knowledge failed client_id={}", client.id
+        )
+        await callback.message.answer(
+            "Не удалось очистить базу. Попробуйте позже."
+        )
+        await callback.answer()
+        return
+    await callback.message.answer(f"🗑 Удалено {deleted} фрагментов.")
+    await callback.answer()
 
 
 @router.message(Command("delete_my_data"))
