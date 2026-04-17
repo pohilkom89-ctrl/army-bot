@@ -22,7 +22,7 @@ from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
 
 from billing import create_payment
-from config import PLANS
+from config import PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from db.repository import (
     anonymize_user,
@@ -391,8 +391,18 @@ async def cmd_usage(message: Message) -> None:
         return
 
     client = await get_or_create_client(user.id, user.username)
-    stats = await get_usage_stats(client.id)
     bot_name = await _active_bot_name(client.id)
+
+    if is_admin(user.id):
+        await message.answer(
+            "📊 Использование токенов\n\n"
+            f"Бот: {bot_name}\n"
+            "Тариф: Безлимит (админ)\n\n"
+            "██████████ ∞ безлимит"
+        )
+        return
+
+    stats = await get_usage_stats(client.id)
 
     used = stats["tokens_used"]
     limit = stats["tokens_limit"]
@@ -580,7 +590,10 @@ def _check_chat_allowed(stats: dict) -> tuple[bool, str | None]:
 
 
 async def _enter_chat_session(
-    client_id: int, state: FSMContext, answer
+    client_id: int,
+    state: FSMContext,
+    answer,
+    telegram_id: int | None = None,
 ) -> None:
     bots = await get_client_bots(client_id)
     active_bots = [b for b in bots if b.is_active]
@@ -601,6 +614,9 @@ async def _enter_chat_session(
         f"Отправляйте сообщения. /exit чтобы выйти."
     )
 
+    if is_admin(telegram_id):
+        return
+
     stats = await get_usage_stats(client_id)
     frac = _tokens_left_fraction(stats)
     if frac is not None and frac < LOW_TOKENS_THRESHOLD:
@@ -619,7 +635,7 @@ async def cmd_chat(message: Message, state: FSMContext) -> None:
     if user is None:
         return
     client = await get_or_create_client(user.id, user.username)
-    await _enter_chat_session(client.id, state, message.answer)
+    await _enter_chat_session(client.id, state, message.answer, user.id)
 
 
 @router.callback_query(F.data == "post_create:chat")
@@ -631,7 +647,9 @@ async def cb_post_create_chat(
         await callback.answer()
         return
     client = await get_or_create_client(user.id, user.username)
-    await _enter_chat_session(client.id, state, callback.message.answer)
+    await _enter_chat_session(
+        client.id, state, callback.message.answer, user.id
+    )
     await callback.answer()
 
 
@@ -727,11 +745,13 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
         )
         return
 
-    stats_before = await get_usage_stats(client.id)
-    allowed, reason = _check_chat_allowed(stats_before)
-    if not allowed:
-        await message.answer(reason or "Чат сейчас недоступен.")
-        return
+    admin = is_admin(user.id)
+    if not admin:
+        stats_before = await get_usage_stats(client.id)
+        allowed, reason = _check_chat_allowed(stats_before)
+        if not allowed:
+            await message.answer(reason or "Чат сейчас недоступен.")
+            return
 
     history = await get_chat_history(
         client.id, bot_id, limit=CHAT_HISTORY_LIMIT
@@ -788,22 +808,26 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
     tokens_total = sum(
         e["tokens_in"] + e["tokens_out"] for e in token_logs
     )
-    for entry in token_logs:
-        await log_tokens(
-            client_id=client.id,
-            bot_id=bot_id,
-            tokens_in=entry["tokens_in"],
-            tokens_out=entry["tokens_out"],
-            model=entry["model"],
-        )
+    if not admin:
+        for entry in token_logs:
+            await log_tokens(
+                client_id=client.id,
+                bot_id=bot_id,
+                tokens_in=entry["tokens_in"],
+                tokens_out=entry["tokens_out"],
+                model=entry["model"],
+            )
 
     await save_chat_message(client.id, bot_id, "user", text, 0)
     await save_chat_message(
         client.id, bot_id, "assistant", reply, tokens_total
     )
 
-    stats = await get_usage_stats(client.id)
-    footer = _format_tokens_footer(stats)
+    if admin:
+        footer = "\n\n💬 Безлимит (админ)"
+    else:
+        stats = await get_usage_stats(client.id)
+        footer = _format_tokens_footer(stats)
 
     await message.answer(reply + footer)
 

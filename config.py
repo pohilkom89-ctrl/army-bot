@@ -5,7 +5,33 @@ change a price or a limit here, it propagates to billing payments, Telegram
 UI buttons, token-bucket enforcement, and the /usage display. Do not inline
 any of these numbers anywhere else.
 """
+import os
 from typing import Any
+
+
+def _parse_admin_ids(raw: str) -> list[int]:
+    out: list[int] = []
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            out.append(int(p))
+        except ValueError:
+            continue
+    return out
+
+
+# Comma-separated Telegram user IDs. Admins bypass subscription checks and
+# don't have their tokens logged against any plan.
+ADMIN_TELEGRAM_IDS: list[int] = _parse_admin_ids(
+    os.getenv("ADMIN_TELEGRAM_IDS", "")
+)
+
+
+def is_admin(telegram_id: int | None) -> bool:
+    return telegram_id is not None and telegram_id in ADMIN_TELEGRAM_IDS
+
 
 PLANS: dict[str, dict[str, Any]] = {
     "starter": {
