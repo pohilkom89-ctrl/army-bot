@@ -227,3 +227,25 @@ def run_pipeline(client_answers: dict[str, Any]) -> BotSpec:
         len(spec.token_logs),
     )
     return spec
+
+
+_EDIT_KEYS_FOR_REGEN = (
+    "communication_style",
+    "forbidden_topics",
+    "scripts",
+    "greeting",
+)
+
+
+def regenerate_system_prompt(bot_config: dict[str, Any]) -> str:
+    """Rebuild system_prompt from a BotConfig.config_json dict, merging
+    client-side edits (style/forbidden/scripts/greeting) into the original
+    architecture before handing it to the prompt-engineer LLM. The caller
+    is responsible for persisting the returned string via
+    repository.update_bot_system_prompt.
+    """
+    architecture = dict(bot_config.get("architecture") or {})
+    for key in _EDIT_KEYS_FOR_REGEN:
+        if key in bot_config and bot_config[key] not in (None, "", [], {}):
+            architecture[key] = bot_config[key]
+    return prompt_engineer_agent(architecture)

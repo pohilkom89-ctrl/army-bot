@@ -140,6 +140,49 @@ async def get_bot_by_id(bot_id: int, client_id: int) -> BotConfig | None:
         return bot
 
 
+async def update_bot_config(
+    bot_id: int, client_id: int, key: str, value: Any
+) -> bool:
+    """Write a key into BotConfig.config_json. Returns False if the bot
+    is not owned by this client. SQLAlchemy's JSON column requires full
+    dict reassignment to register mutation — don't mutate in place."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        cfg = dict(bot.config_json or {})
+        cfg[key] = value
+        bot.config_json = cfg
+        return True
+
+
+async def update_bot_system_prompt(
+    bot_id: int, client_id: int, system_prompt: str
+) -> bool:
+    """Update BotConfig.system_prompt — the column the runtime reads.
+    Callers that only change config_json won't affect runtime behaviour
+    unless they also regenerate the prompt via pipeline.regenerate_system_prompt
+    and persist it through this function."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        bot.system_prompt = system_prompt
+        return True
+
+
 async def set_bot_status(
     bot_id: int, client_id: int, status: str
 ) -> bool:

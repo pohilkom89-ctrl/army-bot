@@ -41,8 +41,15 @@ from db.repository import (
     save_chat_message,
     save_consent,
     set_bot_status,
+    update_bot_config,
+    update_bot_system_prompt,
 )
-from pipeline import _token_accumulator, run_bot_query, run_pipeline
+from pipeline import (
+    _token_accumulator,
+    regenerate_system_prompt,
+    run_bot_query,
+    run_pipeline,
+)
 from services.image_generation import image_generator
 from services.rag import (
     add_knowledge,
@@ -83,6 +90,13 @@ class TeachStates(StatesGroup):
 
 class ImageStates(StatesGroup):
     waiting_prompt = State()
+
+
+class EditStates(StatesGroup):
+    waiting_prompt = State()
+    waiting_forbidden = State()
+    waiting_scripts = State()
+    waiting_greeting = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -979,14 +993,384 @@ async def cb_bot_resume(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+_EDIT_STYLES = (
+    ("official", "Официальный"),
+    ("friendly", "Дружелюбный"),
+    ("expert", "Экспертный"),
+    ("buddy", "Как друг"),
+)
+
+
+def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Системный промпт",
+                    callback_data=f"bot:edit_prompt:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎨 Имя и стиль",
+                    callback_data=f"bot:edit_style:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 Запреты",
+                    callback_data=f"bot:edit_forbidden:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📜 Скрипты",
+                    callback_data=f"bot:edit_scripts:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 Приветствие",
+                    callback_data=f"bot:edit_greeting:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"bot:manage:{bot_id}",
+                )
+            ],
+        ]
+    )
+
+
+async def _resolve_edit_target(
+    callback: CallbackQuery, data_prefix: str
+) -> tuple[int, int] | None:
+    """Parse bot_id from 'prefix:{id}' callback_data and verify ownership.
+    Returns (bot_id, client_id) on success, None after answering the callback
+    with a user-facing error on failure."""
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return None
+    try:
+        bot_id = int((callback.data or "").removeprefix(data_prefix))
+    except ValueError:
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return None
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return None
+    return bot_id, client.id
+
+
 @router.callback_query(F.data.startswith("bot:edit:"))
 async def cb_bot_edit(callback: CallbackQuery) -> None:
-    # Placeholder: full edit flow is Step 2 of block 6.
-    if callback.message is not None:
+    resolved = await _resolve_edit_target(callback, "bot:edit:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if callback.message is not None and bot_cfg is not None:
         await callback.message.answer(
-            "✏️ Редактирование появится на следующем шаге."
+            f"🤖 {bot_cfg.bot_name} — что редактируем?",
+            reply_markup=_edit_menu_keyboard(bot_id),
         )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:edit_prompt:"))
+async def cb_bot_edit_prompt(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_prompt:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if callback.message is not None and bot_cfg is not None:
+        current = bot_cfg.system_prompt or ""
+        # Trim if very long — Telegram caps a single message at 4096 chars.
+        preview = current if len(current) <= 3500 else current[:3500] + "…"
+        await callback.message.answer(
+            f"Текущий системный промпт:\n\n<code>{html.escape(preview)}</code>\n\n"
+            "Отправьте новый текст промпта одним сообщением.",
+            parse_mode="HTML",
+        )
+    await state.set_state(EditStates.waiting_prompt)
+    await state.update_data(edit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(EditStates.waiting_prompt)
+async def on_edit_prompt(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    new_prompt = (message.text or "").strip()
+    if not new_prompt:
+        await message.answer("Пустой текст. Пришлите новый промпт.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("edit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_system_prompt(bot_id, client.id, new_prompt)
+    if not ok:
+        await state.clear()
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    # Mirror in config_json for auditability — regeneration won't overwrite
+    # user-provided prompt (it's the system_prompt column that runtime reads).
+    await update_bot_config(bot_id, client.id, "system_prompt", new_prompt)
+    await state.clear()
+    logger.info(
+        "edit: system_prompt updated client_id={} bot_id={} len={}",
+        client.id,
+        bot_id,
+        len(new_prompt),
+    )
+    await message.answer("✅ Системный промпт обновлён. /mybots")
+
+
+def _edit_style_keyboard(bot_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"bot:edit_style_set:{bot_id}:{key}",
+                )
+            ]
+            for key, label in _EDIT_STYLES
+        ]
+    )
+
+
+@router.callback_query(F.data.startswith("bot:edit_style:"))
+async def cb_bot_edit_style(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_style:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Выберите стиль общения:",
+            reply_markup=_edit_style_keyboard(bot_id),
+        )
+    await callback.answer()
+
+
+async def _regenerate_and_save(bot_id: int, client_id: int) -> bool:
+    """Rebuild system_prompt from config_json and persist it. Returns
+    False if the bot is not owned or config_json has no architecture."""
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if bot_cfg is None:
+        return False
+    cfg = dict(bot_cfg.config_json or {})
+    if not cfg.get("architecture"):
+        return False
+    try:
+        new_prompt = await asyncio.to_thread(regenerate_system_prompt, cfg)
+    except Exception:
+        logger.exception(
+            "edit: regenerate failed client_id={} bot_id={}",
+            client_id,
+            bot_id,
+        )
+        return False
+    await update_bot_system_prompt(bot_id, client_id, new_prompt)
+    return True
+
+
+@router.callback_query(F.data.startswith("bot:edit_style_set:"))
+async def cb_bot_edit_style_set(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    # bot:edit_style_set:{id}:{style}
+    if len(parts) != 4:
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
+    try:
+        bot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    style_key = parts[3]
+    if style_key not in {k for k, _ in _EDIT_STYLES}:
+        await callback.answer("Неизвестный стиль", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(
+        bot_id, client.id, "communication_style", style_key
+    )
+    if not ok:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    if callback.message is not None:
+        await callback.message.answer(
+            "🎨 Стиль сохранён. Регенерирую системный промпт…"
+        )
+    regenerated = await _regenerate_and_save(bot_id, client.id)
+    if callback.message is not None:
+        await callback.message.answer(
+            "✅ Промпт обновлён с новым стилем. /mybots"
+            if regenerated
+            else "⚠️ Не удалось регенерировать промпт — стиль сохранён, "
+            "но старый промпт остался. /mybots"
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:edit_forbidden:"))
+async def cb_bot_edit_forbidden(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_forbidden:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите список запретных тем через запятую.\n"
+            "Пример: политика, конкуренты, персональные данные"
+        )
+    await state.set_state(EditStates.waiting_forbidden)
+    await state.update_data(edit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(EditStates.waiting_forbidden)
+async def on_edit_forbidden(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой список. Пришлите темы через запятую.")
+        return
+    items = [t.strip() for t in raw.split(",") if t.strip()]
+    data = await state.get_data()
+    bot_id = data.get("edit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(
+        bot_id, client.id, "forbidden_topics", items
+    )
+    if not ok:
+        await state.clear()
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    await state.clear()
+    await message.answer(
+        f"🚫 Сохранено {len(items)} "
+        f"{_ru_plural(len(items), ('запрет', 'запрета', 'запретов'))}. "
+        "Регенерирую системный промпт…"
+    )
+    regenerated = await _regenerate_and_save(bot_id, client.id)
+    await message.answer(
+        "✅ Промпт обновлён с новыми запретами. /mybots"
+        if regenerated
+        else "⚠️ Не удалось регенерировать промпт — запреты сохранены, "
+        "но старый промпт остался. /mybots"
+    )
+
+
+@router.callback_query(F.data.startswith("bot:edit_scripts:"))
+async def cb_bot_edit_scripts(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_scripts:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите текст скриптов одним сообщением — как бот должен "
+            "отвечать на типовые запросы."
+        )
+    await state.set_state(EditStates.waiting_scripts)
+    await state.update_data(edit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(EditStates.waiting_scripts)
+async def on_edit_scripts(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст. Пришлите скрипты.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("edit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(bot_id, client.id, "scripts", text)
+    if not ok:
+        await state.clear()
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    await state.clear()
+    await message.answer("📜 Скрипты сохранены. /mybots")
+
+
+@router.callback_query(F.data.startswith("bot:edit_greeting:"))
+async def cb_bot_edit_greeting(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_greeting:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите новое приветствие одним сообщением."
+        )
+    await state.set_state(EditStates.waiting_greeting)
+    await state.update_data(edit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(EditStates.waiting_greeting)
+async def on_edit_greeting(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст. Пришлите приветствие.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("edit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(bot_id, client.id, "greeting", text)
+    if not ok:
+        await state.clear()
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    await state.clear()
+    await message.answer("💬 Приветствие сохранено. /mybots")
 
 
 @router.callback_query(F.data.startswith("bot:delete:"))
