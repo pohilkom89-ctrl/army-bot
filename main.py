@@ -4,7 +4,6 @@ import os
 import signal
 from datetime import datetime, timezone
 from io import BytesIO
-from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -27,6 +26,14 @@ from loguru import logger
 from billing import create_payment
 from config import MODELS, MODEL_STRATEGIES, PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
+from deployer import (
+    deploy_bot,
+    get_bot_logs,
+    get_bot_status,
+    prepare_bot_files,
+    remove_bot,
+    stop_bot,
+)
 from db.repository import (
     anonymize_user,
     delete_bot,
@@ -67,9 +74,6 @@ from services.rag import (
 )
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
-
-BOTS_DIR = Path("bots")
-
 
 CONSENT_TEXT = """Для создания бота мы обрабатываем ваш Telegram ID и username.
 Данные хранятся на серверах в России, третьим лицам не передаются.
@@ -380,10 +384,6 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         spec = await asyncio.to_thread(run_pipeline, pipeline_input)
 
         client = await get_or_create_client(user.id, user.username)
-        bot_dir = BOTS_DIR / str(client.id)
-        bot_dir.mkdir(parents=True, exist_ok=True)
-        (bot_dir / "main.py").write_text(spec.bot_code, encoding="utf-8")
-
         resolved_type = spec.requirements.get("bot_type", bot_type or "other")
         saved_bot = await save_bot_config(
             client_id=client.id,
@@ -400,6 +400,9 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
             },
             bot_token=bot_token,
         )
+        # Files live under bots/{bot_id}/ so multiple bots per client don't
+        # collide; deployer uses the same path.
+        prepare_bot_files(spec.bot_code, saved_bot.id)
         for entry in spec.token_logs:
             await log_tokens(
                 client_id=client.id,
@@ -415,10 +418,21 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         return
 
     logger.info(
-        "intake: pipeline ok for client_id={} (code_len={} bytes)",
+        "intake: pipeline ok for client_id={} bot_id={} (code_len={} bytes)",
         client.id,
+        saved_bot.id,
         len(spec.bot_code),
     )
+
+    deploy_ok = False
+    try:
+        await deploy_bot(saved_bot.id)
+        deploy_ok = True
+    except Exception:
+        logger.exception(
+            "intake: deploy_bot failed for bot_id={}", saved_bot.id
+        )
+
     post_create_kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -433,11 +447,21 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
             ],
         ]
     )
-    await message.answer(
-        f"✅ Бот готов!\n\nТип: {resolved_type}\nФайл сохранён.\n\n"
-        "Для запуска оформите подписку /subscribe",
-        reply_markup=post_create_kb,
-    )
+    if deploy_ok:
+        await message.answer(
+            f"✅ Бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
+            f"Контейнер: bot_client_{saved_bot.id}\n\n"
+            "Оформите подписку /subscribe чтобы открыть доступ клиентам.",
+            reply_markup=post_create_kb,
+        )
+    else:
+        await message.answer(
+            f"⚠️ Бот создан, но контейнер не поднялся.\n\nТип: {resolved_type}\n"
+            f"Файл: bots/{saved_bot.id}/main.py сохранён.\n\n"
+            "Напишите в поддержку: вероятно конфликт токена или ошибка в коде бота. "
+            "Можно посмотреть логи через /mybots → карточка бота.",
+            reply_markup=post_create_kb,
+        )
     await state.clear()
 
 
@@ -1230,10 +1254,20 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
     )
 
 
-def _render_bot_detail(bot, stats: dict) -> str:
+_CONTAINER_STATUS_RU = {
+    "running": "🟢 работает",
+    "stopped": "🟡 остановлен",
+    "not_deployed": "⚪ не развёрнут",
+    "error": "🔴 ошибка",
+}
+
+
+def _render_bot_detail(bot, stats: dict, container_status: str) -> str:
+    status_line = _CONTAINER_STATUS_RU.get(container_status, container_status)
     return (
         f"🤖 {bot.bot_name} — {_bot_type_ru(bot.bot_type)}\n"
-        f"Статус: {_bot_status_badge(bot)}\n\n"
+        f"Статус: {_bot_status_badge(bot)}\n"
+        f"🐳 Контейнер: {status_line}\n\n"
         "📊 Статистика:\n"
         f"• Всего запросов: {_format_num(stats['request_count'])}\n"
         f"• Токенов использовано: {_format_num(stats['tokens_used'])}\n"
@@ -1254,9 +1288,10 @@ async def _answer_bot_detail(callback: CallbackQuery, client_id: int, bot_id: in
     if bot_cfg is None or stats is None:
         await callback.answer("Бот не найден", show_alert=True)
         return
+    container_status = await get_bot_status(bot_id)
     if callback.message is not None:
         await callback.message.answer(
-            _render_bot_detail(bot_cfg, stats),
+            _render_bot_detail(bot_cfg, stats, container_status),
             reply_markup=_bot_detail_keyboard(bot_cfg),
         )
 
@@ -1306,10 +1341,14 @@ async def cb_bot_pause(callback: CallbackQuery) -> None:
     if not ok:
         await callback.answer("Бот не найден", show_alert=True)
         return
+    try:
+        await stop_bot(bot_id)
+    except Exception:
+        logger.exception("mybots: stop_bot failed bot_id={}", bot_id)
     if callback.message is not None:
         await callback.message.answer(
             "⏸ Бот поставлен на паузу.\n"
-            "Новые запросы обрабатываться не будут.\n"
+            "Контейнер остановлен, новые запросы не обрабатываются.\n"
             "/mybots чтобы возобновить"
         )
     await callback.answer()
@@ -1330,6 +1369,19 @@ async def cb_bot_resume(callback: CallbackQuery) -> None:
     ok = await set_bot_status(bot_id, client.id, "active")
     if not ok:
         await callback.answer("Бот не найден", show_alert=True)
+        return
+    # deploy_bot is idempotent — fast-starts an existing stopped container
+    # or rebuilds from scratch if it was removed.
+    try:
+        await deploy_bot(bot_id)
+    except Exception:
+        logger.exception("mybots: deploy_bot failed bot_id={}", bot_id)
+        if callback.message is not None:
+            await callback.message.answer(
+                "⚠️ Статус в БД обновлён на «активен», но контейнер не стартовал. "
+                "Посмотрите логи в карточке бота."
+            )
+        await callback.answer()
         return
     if callback.message is not None:
         await callback.message.answer("✅ Бот снова работает")
@@ -1773,6 +1825,13 @@ async def cb_bot_delete_yes(callback: CallbackQuery) -> None:
         await callback.answer("Некорректный идентификатор", show_alert=True)
         return
     client = await get_or_create_client(user.id, user.username)
+    # Tear down the container first — if we delete the DB row before the
+    # container, we'd end up with an orphan container we no longer have the
+    # bot_token for (it's sourced from BotConfig on every deploy).
+    try:
+        await remove_bot(bot_id)
+    except Exception:
+        logger.exception("mybots: remove_bot failed bot_id={}", bot_id)
     try:
         ok = await delete_bot(bot_id, client.id)
     except Exception:

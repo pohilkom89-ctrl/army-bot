@@ -75,3 +75,10 @@ MODELS: dict[str, str] = {
 }
 
 MODEL_STRATEGIES: tuple[str, ...] = ("auto", "smart", "cheap")
+
+
+# Per-container resource caps for generated client bots. Conservative MVP
+# defaults — enough to run aiogram polling + a single LLM call in flight,
+# tight enough that a runaway bot can't starve the host or its neighbours.
+CONTAINER_CPU_LIMIT: float = 0.5
+CONTAINER_MEMORY_LIMIT: str = "256m"

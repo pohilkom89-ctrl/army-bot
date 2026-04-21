@@ -141,6 +141,21 @@ async def get_bot_by_id(bot_id: int, client_id: int) -> BotConfig | None:
         return bot
 
 
+async def get_bot_by_id_any(bot_id: int) -> BotConfig | None:
+    """Fetch a bot by PK without ownership check. Used by infrastructure
+    callers (deployer, migration scripts) that already know the bot_id
+    from an out-of-band source. User-facing code paths should prefer
+    get_bot_by_id(bot_id, client_id)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(BotConfig.id == bot_id)
+        )
+        bot = result.scalar_one_or_none()
+        if bot is not None:
+            session.expunge(bot)
+        return bot
+
+
 async def update_bot_config(
     bot_id: int, client_id: int, key: str, value: Any
 ) -> bool:
