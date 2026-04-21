@@ -39,6 +39,9 @@ class Client(Base):
     data_deleted = Column(Boolean, nullable=False, default=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Daily token-limit alerts. Default ON; flipped via /limit_alerts.
+    limit_alerts_enabled = Column(Boolean, nullable=False, default=True)
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     bots = relationship(

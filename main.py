@@ -34,13 +34,18 @@ from db.repository import (
     get_bot_stats,
     get_chat_history,
     get_client_bots,
+    get_daily_usage,
+    get_limit_alerts_enabled,
     get_or_create_client,
+    get_usage_by_bot,
     get_usage_stats,
+    get_usage_trend,
     log_tokens,
     save_bot_config,
     save_chat_message,
     save_consent,
     set_bot_status,
+    set_limit_alerts,
     update_bot_config,
     update_bot_system_prompt,
 )
@@ -50,6 +55,7 @@ from pipeline import (
     run_bot_query,
     run_pipeline,
 )
+from services.alerts import start_alerts_scheduler
 from services.image_generation import image_generator
 from services.rag import (
     add_knowledge,
@@ -481,74 +487,147 @@ async def _active_bot_name(client_id: int) -> str:
     return active[0].bot_name
 
 
+def _format_ru_date_short(dt) -> str:
+    return f"{dt.day} {_RU_MONTHS[dt.month - 1]}"
+
+
+def _days_until(dt) -> int:
+    if dt is None:
+        return 0
+    delta = dt - datetime.now(timezone.utc)
+    return max(0, delta.days)
+
+
+def _usage_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📈 История", callback_data="usage:history"
+                ),
+                InlineKeyboardButton(
+                    text="⚙️ Тариф", callback_data="usage:upgrade"
+                ),
+                InlineKeyboardButton(
+                    text="◀️ Назад", callback_data="usage:back"
+                ),
+            ]
+        ]
+    )
+
+
+def _format_trend_block(trend: dict) -> str:
+    lines = [
+        "Динамика:",
+        f"Сегодня:       {_format_num(trend['today'])} ток",
+        f"Вчера:         {_format_num(trend['yesterday'])} ток",
+        f"Эта неделя:    {_format_num(trend['this_week'])} ток",
+        f"Прошлая нед:   {_format_num(trend['last_week'])} ток",
+    ]
+    growth = trend.get("growth_pct")
+    if growth is None:
+        lines.append("→ нет данных за прошлую неделю")
+    elif growth > 0:
+        lines.append(f"→ рост на {growth}%")
+    elif growth < 0:
+        lines.append(f"→ падение на {abs(growth)}%")
+    else:
+        lines.append("→ без изменений")
+    return "\n".join(lines)
+
+
+async def _render_usage_main(
+    client_id: int, telegram_id: int
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    if is_admin(telegram_id):
+        return (
+            "📊 Использование токенов\n\n"
+            "Тариф: Безлимит (админ)\n\n"
+            "██████████ ∞ безлимит"
+        ), None
+
+    stats = await get_usage_stats(client_id)
+    tier = stats["tier"]
+    limit = stats["tokens_limit"]
+    used = stats["tokens_used"]
+    cost = stats["cost_usd_total"]
+    reset_at = stats["reset_at"]
+
+    if tier is None:
+        return (
+            "📊 Использование токенов\n\n"
+            "Тариф: нет активной подписки\n\n"
+            f"Использовано: {_format_num(used)}\n"
+            f"💰 Потрачено: ${cost:.2f}\n\n"
+            "Оформите подписку → /subscribe"
+        ), _upgrade_keyboard()
+
+    tier_label = PLANS[tier]["name"] if tier in PLANS else tier
+    reset_short = _format_ru_date_short(reset_at) if reset_at else "—"
+    days_to_reset = _days_until(reset_at)
+    reset_line = (
+        f"Сброс: через {days_to_reset} "
+        f"{_ru_plural(days_to_reset, ('день', 'дня', 'дней'))} "
+        f"({reset_short})"
+    )
+
+    header = (
+        "📊 Использование за текущий период\n\n"
+        f"Тариф: {tier_label}\n"
+        f"{reset_line}\n\n"
+    )
+
+    # Business = unlimited tokens — skip bar and breakdown percentages.
+    if limit is None:
+        total_line = (
+            f"Всего: {_format_num(used)} токенов\n"
+            "██████████ ∞ безлимит\n"
+        )
+    else:
+        bar, pct_used = _progress_bar_used(used, limit)
+        total_line = (
+            f"Всего: {_format_num(used)} / {_format_num(limit)} токенов\n"
+            f"{bar} {pct_used}%\n"
+        )
+
+    # Breakdown since period_start (= last reset, 30 days before reset_at).
+    period_start = (
+        reset_at - timedelta(days=30)
+        if reset_at is not None
+        else datetime.now(timezone.utc) - timedelta(days=30)
+    )
+    breakdown = await get_usage_by_bot(client_id, period_start)
+    bd_lines: list[str] = []
+    if breakdown:
+        bd_lines.append("\nПо ботам:")
+        total = sum(b["tokens"] for b in breakdown) or 1
+        for b in breakdown:
+            pct = round(100 * b["tokens"] / total)
+            bd_lines.append(
+                f"🤖 {b['bot_name']} ({_bot_type_ru(b['bot_type'])}) — "
+                f"{_format_num(b['tokens'])} ток ({pct}%)"
+            )
+
+    trend = await get_usage_trend(client_id)
+    text = (
+        header
+        + total_line
+        + "\n".join(bd_lines)
+        + ("\n" if bd_lines else "")
+        + f"\n💰 Стоимость: ${cost:.2f}\n\n"
+        + _format_trend_block(trend)
+    )
+    return text, _usage_main_keyboard()
+
+
 @router.message(Command("usage"))
 async def cmd_usage(message: Message) -> None:
     user = message.from_user
     if user is None:
         return
-
     client = await get_or_create_client(user.id, user.username)
-    bot_name = await _active_bot_name(client.id)
-
-    if is_admin(user.id):
-        await message.answer(
-            "📊 Использование токенов\n\n"
-            f"Бот: {bot_name}\n"
-            "Тариф: Безлимит (админ)\n\n"
-            "██████████ ∞ безлимит"
-        )
-        return
-
-    stats = await get_usage_stats(client.id)
-
-    used = stats["tokens_used"]
-    limit = stats["tokens_limit"]
-    cost = stats["cost_usd_total"]
-    reset_at = stats["reset_at"]
-    tier = stats["tier"]
-
-    reset_str = _format_ru_date(reset_at) if reset_at is not None else "—"
-
-    if tier is None:
-        await message.answer(
-            "📊 Использование токенов\n\n"
-            f"Бот: {bot_name}\n"
-            "Тариф: нет активной подписки\n\n"
-            f"Использовано: {_format_num(used)}\n"
-            f"Потрачено: ${cost:.2f}\n\n"
-            "Оформите подписку → /subscribe",
-            reply_markup=_upgrade_keyboard(),
-        )
-        return
-
-    tier_label = PLANS[tier]["name"] if tier in PLANS else tier
-    is_business = limit is None
-
-    if is_business:
-        await message.answer(
-            "📊 Использование токенов\n\n"
-            f"Бот: {bot_name}\n"
-            f"Тариф: {tier_label}\n\n"
-            "██████████ ∞ безлимит\n"
-            f"Использовано: {_format_num(used)}\n\n"
-            f"Потрачено: ${cost:.2f}\n"
-            f"Сброс: {reset_str}"
-        )
-        return
-
-    tokens_left = max(0, limit - used)
-    bar, pct_used = _progress_bar_used(used, limit)
-    text = (
-        "📊 Использование токенов\n\n"
-        f"Бот: {bot_name}\n"
-        f"Тариф: {tier_label}\n\n"
-        f"{bar} {pct_used}% использовано\n"
-        f"Использовано: {_format_num(used)} / {_format_num(limit)}\n"
-        f"Осталось: {_format_num(tokens_left)} токенов\n\n"
-        f"Потрачено: ${cost:.2f}\n"
-        f"Сброс: {reset_str}"
-    )
-    await message.answer(text, reply_markup=_upgrade_keyboard())
+    text, kb = await _render_usage_main(client.id, user.id)
+    await message.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "usage:upgrade")
@@ -556,6 +635,137 @@ async def cb_usage_upgrade(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await callback.message.answer(
             "Выберите тариф подписки:", reply_markup=_subscribe_keyboard()
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "usage:back")
+async def cb_usage_back(callback: CallbackQuery) -> None:
+    if callback.message is not None:
+        try:
+            await callback.message.delete()
+        except Exception:
+            # Message too old to delete, or already gone.
+            pass
+    await callback.answer()
+
+
+DAILY_CHART_DAYS = 14
+DAILY_CHART_WIDTH = 10
+
+
+def _render_daily_chart(daily: list[dict], max_tokens: int) -> str:
+    lines = []
+    scale = max_tokens or 1
+    for row in daily:
+        filled = round(DAILY_CHART_WIDTH * row["tokens"] / scale)
+        filled = max(0, min(DAILY_CHART_WIDTH, filled))
+        bar = "▓" * filled + "░" * (DAILY_CHART_WIDTH - filled)
+        lines.append(
+            f"{row['date'].strftime('%d.%m')} {bar}  "
+            f"{_format_num(row['tokens'])}"
+        )
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "usage:history")
+async def cb_usage_history(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    client = await get_or_create_client(user.id, user.username)
+    daily = await get_daily_usage(client.id, days=DAILY_CHART_DAYS)
+    total = sum(d["tokens"] for d in daily)
+    max_tokens = max((d["tokens"] for d in daily), default=0)
+    avg = total // DAILY_CHART_DAYS if DAILY_CHART_DAYS else 0
+
+    chart = _render_daily_chart(daily, max_tokens)
+    text_lines = [
+        f"Потребление за {DAILY_CHART_DAYS} дней:\n",
+        f"<pre>{html.escape(chart)}</pre>",
+        "",
+        f"Среднее: {_format_num(avg)} токенов/день",
+    ]
+
+    stats = await get_usage_stats(client.id)
+    limit = stats["tokens_limit"]
+    used = stats["tokens_used"]
+    if limit is not None and avg > 0:
+        tokens_left = max(0, limit - used)
+        days_left = tokens_left // avg if avg else 0
+        text_lines.append(
+            f"При текущем темпе — хватит на {days_left} "
+            f"{_ru_plural(days_left, ('день', 'дня', 'дней'))}"
+        )
+    elif limit is None and stats["tier"] is not None:
+        text_lines.append("Лимит: безлимит")
+
+    if callback.message is not None:
+        await callback.message.answer(
+            "\n".join(text_lines), parse_mode="HTML"
+        )
+    await callback.answer()
+
+
+def _limit_alerts_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔔 Включены" if enabled else "🔕 Выключены",
+                    callback_data="limit_alerts:noop",
+                ),
+                InlineKeyboardButton(
+                    text="🔕 Отключить" if enabled else "🔔 Включить",
+                    callback_data=(
+                        "limit_alerts:off" if enabled else "limit_alerts:on"
+                    ),
+                ),
+            ]
+        ]
+    )
+
+
+@router.message(Command("limit_alerts"))
+async def cmd_limit_alerts(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    # Touch the client row so the default (enabled=True) is persisted.
+    await get_or_create_client(user.id, user.username)
+    enabled = await get_limit_alerts_enabled(user.id)
+    await message.answer(
+        "Уведомления о лимите токенов\n\n"
+        f"Статус: {'включены' if enabled else 'отключены'}\n"
+        "Раз в день в 10:00 мы пишем, если у вас осталось меньше 30% месячного лимита.",
+        reply_markup=_limit_alerts_keyboard(enabled),
+    )
+
+
+@router.callback_query(F.data.startswith("limit_alerts:"))
+async def cb_limit_alerts(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    action = (callback.data or "").split(":", 1)[1]
+    if action == "noop":
+        await callback.answer()
+        return
+    if action not in ("on", "off"):
+        await callback.answer()
+        return
+    await get_or_create_client(user.id, user.username)
+    ok = await set_limit_alerts(user.id, action == "on")
+    if not ok:
+        await callback.answer("Не удалось обновить", show_alert=True)
+        return
+    enabled = action == "on"
+    if callback.message is not None:
+        await callback.message.answer(
+            "🔔 Уведомления включены" if enabled else "🔕 Уведомления отключены",
+            reply_markup=_limit_alerts_keyboard(enabled),
         )
     await callback.answer()
 
@@ -1989,6 +2199,8 @@ async def main():
     logger.info("База данных инициализирована")
     logger.info("Бот запущен")
 
+    scheduler = start_alerts_scheduler(bot)
+
     polling_task = asyncio.create_task(
         dp.start_polling(bot), name="polling"
     )
@@ -2009,6 +2221,11 @@ async def main():
         await dp.stop_polling()
     except Exception:
         logger.exception("shutdown: dp.stop_polling raised")
+
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        logger.exception("shutdown: scheduler.shutdown raised")
 
     for task in (polling_task, webhook_task, shutdown_task):
         if not task.done():

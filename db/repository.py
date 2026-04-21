@@ -484,6 +484,216 @@ async def get_chat_history(
     ]
 
 
+async def set_limit_alerts(telegram_id: int, enabled: bool) -> bool:
+    """Flip the per-client toggle for daily limit alerts."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client).where(Client.telegram_id == telegram_id)
+        )
+        client = result.scalar_one_or_none()
+        if client is None:
+            return False
+        client.limit_alerts_enabled = enabled
+        return True
+
+
+async def get_limit_alerts_enabled(telegram_id: int) -> bool:
+    """Default True: treat missing client as enabled so new users get alerts."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client.limit_alerts_enabled).where(
+                Client.telegram_id == telegram_id
+            )
+        )
+        row = result.scalar_one_or_none()
+        return True if row is None else bool(row)
+
+
+async def get_usage_by_bot(
+    client_id: int, period_start: datetime
+) -> list[dict[str, Any]]:
+    """Per-bot token totals since period_start. Rows whose bot_id is
+    NULL (bot deleted — SET NULL cascade) are skipped: we only surface
+    breakdowns the client can still act on."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(
+                BotConfig.id,
+                BotConfig.bot_name,
+                BotConfig.bot_type,
+                func.coalesce(
+                    func.sum(TokenLog.tokens_in + TokenLog.tokens_out), 0
+                ).label("tokens"),
+            )
+            .join(TokenLog, TokenLog.bot_id == BotConfig.id)
+            .where(
+                TokenLog.client_id == client_id,
+                TokenLog.created_at >= period_start,
+            )
+            .group_by(BotConfig.id, BotConfig.bot_name, BotConfig.bot_type)
+            .order_by(func.sum(
+                TokenLog.tokens_in + TokenLog.tokens_out
+            ).desc())
+        )
+        rows = result.all()
+    return [
+        {
+            "bot_id": r.id,
+            "bot_name": r.bot_name,
+            "bot_type": r.bot_type,
+            "tokens": int(r.tokens or 0),
+        }
+        for r in rows
+    ]
+
+
+async def get_daily_usage(
+    client_id: int, days: int = 14
+) -> list[dict[str, Any]]:
+    """Token totals bucketed by UTC day for the last `days` days. Missing
+    days are filled with zero so the caller can render a continuous chart."""
+    now = _utcnow()
+    start = (now - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    async with get_session() as session:
+        result = await session.execute(
+            select(
+                func.date_trunc("day", TokenLog.created_at).label("d"),
+                func.coalesce(
+                    func.sum(TokenLog.tokens_in + TokenLog.tokens_out), 0
+                ).label("tokens"),
+            )
+            .where(
+                TokenLog.client_id == client_id,
+                TokenLog.created_at >= start,
+            )
+            .group_by("d")
+        )
+        by_date: dict[datetime, int] = {
+            row.d: int(row.tokens or 0) for row in result.all()
+        }
+
+    out = []
+    for i in range(days):
+        day = start + timedelta(days=i)
+        out.append({"date": day, "tokens": by_date.get(day, 0)})
+    return out
+
+
+async def get_usage_trend(client_id: int) -> dict[str, Any]:
+    """today / yesterday / this_week (last 7 days) / last_week (8-14 days ago)
+    with week-over-week growth as percent. Negative growth is reported."""
+    now = _utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+    this_week_start = today_start - timedelta(days=6)
+    last_week_start = today_start - timedelta(days=13)
+
+    async def _sum(since, until) -> int:
+        async with get_session() as session:
+            result = await session.execute(
+                select(
+                    func.coalesce(
+                        func.sum(TokenLog.tokens_in + TokenLog.tokens_out),
+                        0,
+                    )
+                ).where(
+                    TokenLog.client_id == client_id,
+                    TokenLog.created_at >= since,
+                    TokenLog.created_at < until,
+                )
+            )
+            return int(result.scalar_one() or 0)
+
+    today_end = today_start + timedelta(days=1)
+    today = await _sum(today_start, today_end)
+    yesterday = await _sum(yesterday_start, today_start)
+    this_week = await _sum(this_week_start, today_end)
+    last_week = await _sum(last_week_start, this_week_start)
+
+    if last_week > 0:
+        growth_pct = round(100 * (this_week - last_week) / last_week)
+    else:
+        growth_pct = None
+
+    return {
+        "today": today,
+        "yesterday": yesterday,
+        "this_week": this_week,
+        "last_week": last_week,
+        "growth_pct": growth_pct,
+    }
+
+
+async def get_clients_for_limit_alerts() -> list[dict[str, Any]]:
+    """Return alert candidates: clients with alerts_enabled=True, an
+    active subscription, finite tokens_limit, and ≥70% consumption
+    (i.e. ≤30% tokens remaining). Also returns days_left projected
+    from the last 7 days' average rate so the scheduler can word the
+    message appropriately."""
+    now = _utcnow()
+    week_start = now - timedelta(days=7)
+
+    out: list[dict[str, Any]] = []
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client, Subscription)
+            .join(
+                Subscription,
+                Subscription.client_id == Client.id,
+            )
+            .where(
+                Client.limit_alerts_enabled.is_(True),
+                Client.data_deleted.is_(False),
+                Subscription.status == "active",
+                Subscription.expires_at > now,
+                Subscription.tokens_limit.is_not(None),
+            )
+        )
+        rows = list(result.all())
+
+        for client, sub in rows:
+            _maybe_reset_tokens(sub, now)
+            limit = sub.tokens_limit
+            used = sub.tokens_used or 0
+            if limit <= 0:
+                continue
+            pct_left = max(0, limit - used) / limit
+            if pct_left > 0.30:
+                continue
+
+            week_result = await session.execute(
+                select(
+                    func.coalesce(
+                        func.sum(TokenLog.tokens_in + TokenLog.tokens_out),
+                        0,
+                    )
+                ).where(
+                    TokenLog.client_id == client.id,
+                    TokenLog.created_at >= week_start,
+                )
+            )
+            week_tokens = int(week_result.scalar_one() or 0)
+            avg_daily = week_tokens / 7 if week_tokens else 0
+            tokens_left = max(0, limit - used)
+            if avg_daily > 0:
+                days_left = int(tokens_left / avg_daily)
+            else:
+                days_left = None
+
+            out.append(
+                {
+                    "client_id": client.id,
+                    "telegram_id": client.telegram_id,
+                    "pct_left": pct_left,
+                    "tokens_left": tokens_left,
+                    "days_left": days_left,
+                }
+            )
+    return out
+
+
 async def get_active_subscription(client_id: int) -> Subscription | None:
     async with get_session() as session:
         now = _utcnow()
