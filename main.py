@@ -1,4 +1,5 @@
 import asyncio
+import html
 import os
 import signal
 from io import BytesIO
@@ -45,6 +46,7 @@ from services.rag import (
     list_knowledge_sources,
     search_knowledge,
 )
+from services.voice import transcribe_voice
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
 
@@ -833,7 +835,31 @@ def _format_tokens_footer(stats: dict) -> str:
     return f"\n\n💬 Осталось: {left_fmt} токенов"
 
 
-@router.message(InlineChatStates.chatting)
+@router.message(InlineChatStates.chatting, F.voice)
+async def on_chat_voice(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None or message.voice is None:
+        return
+    buf = BytesIO()
+    try:
+        await bot.download(message.voice, destination=buf)
+    except Exception:
+        logger.exception("chat: voice download failed")
+        await message.answer("Не удалось скачать голосовое сообщение.")
+        return
+    transcribed = await transcribe_voice(buf.getvalue())
+    if not transcribed or not transcribed.strip():
+        await message.answer(
+            "Не удалось распознать голос, попробуйте текстом."
+        )
+        return
+    text = transcribed.strip()
+    await _handle_chat_text(
+        message, state, user, text, transcription_prefix=text
+    )
+
+
+@router.message(InlineChatStates.chatting, F.text)
 async def on_chat_message(message: Message, state: FSMContext) -> None:
     user = message.from_user
     if user is None:
@@ -841,6 +867,21 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
         return
+    await _handle_chat_text(message, state, user, text)
+
+
+async def _handle_chat_text(
+    message: Message,
+    state: FSMContext,
+    user,
+    text: str,
+    transcription_prefix: str | None = None,
+) -> None:
+    if transcription_prefix:
+        await message.answer(
+            f"<i>Распознано: {html.escape(transcription_prefix)}</i>",
+            parse_mode="HTML",
+        )
 
     data = await state.get_data()
     bot_id = data.get("chat_bot_id")
@@ -1020,6 +1061,62 @@ async def cmd_teach_done(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Готово! Ваш бот теперь использует эти знания в чате /chat"
+    )
+
+
+@router.message(TeachStates.receiving, F.voice)
+async def on_teach_voice(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None or message.voice is None:
+        return
+    data = await state.get_data()
+    bot_id = data.get("teach_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer(
+            "Сессия обучения потеряна. /teach чтобы начать заново."
+        )
+        return
+    client = await get_or_create_client(user.id, user.username)
+
+    buf = BytesIO()
+    try:
+        await bot.download(message.voice, destination=buf)
+    except Exception:
+        logger.exception("teach: voice download failed")
+        await message.answer("Не удалось скачать голосовое сообщение.")
+        return
+    transcribed = await transcribe_voice(buf.getvalue())
+    if not transcribed or not transcribed.strip():
+        await message.answer(
+            "Не удалось распознать голос, попробуйте текстом."
+        )
+        return
+    raw_text = transcribed.strip()
+
+    try:
+        added = await add_knowledge(client.id, bot_id, raw_text, "voice")
+    except Exception:
+        logger.exception(
+            "teach: add_knowledge (voice) failed client_id={}", client.id
+        )
+        await message.answer(
+            "Не удалось добавить в базу знаний. Попробуйте позже."
+        )
+        return
+
+    if added == 0:
+        await message.answer(
+            "Не удалось разбить текст на фрагменты. Попробуйте ещё раз."
+        )
+        return
+
+    total = await count_knowledge(client.id, bot_id)
+    await message.answer(
+        f"<i>Распознано: {html.escape(raw_text)}</i>\n\n"
+        f"✅ Добавлено в базу знаний ({added} фрагментов).\n"
+        f"Всего в базе: {total} фрагментов. Отправьте ещё или /done",
+        parse_mode="HTML",
     )
 
 
