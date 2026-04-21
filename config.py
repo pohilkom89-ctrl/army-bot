@@ -61,3 +61,17 @@ PLANS: dict[str, dict[str, Any]] = {
 }
 
 CYCLES: tuple[str, ...] = ("monthly", "yearly")
+
+
+# Multi-LLM routing — model tiers used by run_bot_query and agents/router.py.
+# Keys are the tier names stored in BotConfig.config_json["model_strategy"]
+# ("auto" resolves to one of these at runtime); values are OpenRouter slugs.
+# Cost per 1M tokens for each slug must also be kept in sync with
+# db/repository.MODEL_PRICING_USD_PER_1M.
+MODELS: dict[str, str] = {
+    "cheap": "meta-llama/llama-3.3-70b-instruct",  # $0.12/1M
+    "balanced": "deepseek/deepseek-chat-v3.1",     # $0.28/1M
+    "smart": "qwen/qwen3-235b-a22b",               # $0.54/1M
+}
+
+MODEL_STRATEGIES: tuple[str, ...] = ("auto", "smart", "cheap")

@@ -7,9 +7,14 @@ from typing import Any, Optional
 from loguru import logger
 from openai import OpenAI
 
+from config import MODELS
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MODEL_AGENTS = os.getenv("OPENROUTER_MODEL_AGENTS", "deepseek/deepseek-chat-v3.1")
-MODEL_BOTS = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
+# Legacy default when a caller of run_bot_query doesn't pass tier — points
+# at the balanced tier so behaviour stays the same for callers that didn't
+# opt into multi-LLM routing.
+MODEL_BOTS = os.getenv("OPENROUTER_MODEL_BOTS", MODELS["balanced"])
 MAX_TOKENS = 4096
 
 # Whitelist of fields allowed into LLM prompts. Anything else (telegram_id,
@@ -97,11 +102,26 @@ def run_agent(system: str, user_message: str, context: str = "") -> str:
     return _chat(MODEL_AGENTS, system, user_message)
 
 
-def run_bot_query(system: str, user_message: str, context: str = "") -> str:
-    """LLM call for generated runtime bots. Uses a cheaper/faster model tier."""
+def run_bot_query(
+    system: str,
+    user_message: str,
+    context: str = "",
+    tier: str = "balanced",
+) -> str:
+    """LLM call for generated runtime bots. `tier` selects a model from
+    config.MODELS ('cheap' | 'balanced' | 'smart'); unknown tiers fall
+    back to the legacy `MODEL_BOTS` env var to keep behaviour stable."""
     if context:
         user_message = f"<context>\n{context}\n</context>\n\n{user_message}"
-    return _chat(MODEL_BOTS, system, user_message)
+    model = MODELS.get(tier, MODEL_BOTS)
+    return _chat(model, system, user_message)
+
+
+def run_with_model(model: str, system: str, user_message: str) -> str:
+    """Direct-model LLM call, used by agents (e.g. the router) that need
+    to pin a specific slug regardless of tier strategy. Goes through the
+    same _chat path so token accounting is unchanged."""
+    return _chat(model, system, user_message)
 
 
 # Agent imports live below run_agent to break the circular dependency:

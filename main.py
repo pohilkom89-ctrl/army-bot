@@ -25,7 +25,7 @@ from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
 
 from billing import create_payment
-from config import PLANS, is_admin
+from config import MODELS, MODEL_STRATEGIES, PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from db.repository import (
     anonymize_user,
@@ -38,6 +38,7 @@ from db.repository import (
     get_limit_alerts_enabled,
     get_or_create_client,
     get_usage_by_bot,
+    get_usage_by_model,
     get_usage_stats,
     get_usage_trend,
     log_tokens,
@@ -608,16 +609,50 @@ async def _render_usage_main(
                 f"{_format_num(b['tokens'])} ток ({pct}%)"
             )
 
+    model_breakdown = await get_usage_by_model(client_id, period_start)
+    md_lines: list[str] = []
+    if model_breakdown:
+        md_lines.append("\nПо моделям:")
+        for m in model_breakdown:
+            label = _TIER_LABEL_BY_SLUG.get(m["model"], m["model"])
+            md_lines.append(
+                f"{label}: {_format_num(m['tokens'])} ток "
+                f"(${m['cost_usd']:.2f})"
+            )
+
     trend = await get_usage_trend(client_id)
     text = (
         header
         + total_line
         + "\n".join(bd_lines)
         + ("\n" if bd_lines else "")
+        + "\n".join(md_lines)
+        + ("\n" if md_lines else "")
         + f"\n💰 Стоимость: ${cost:.2f}\n\n"
         + _format_trend_block(trend)
     )
     return text, _usage_main_keyboard()
+
+
+_TIER_EMOJI = {"cheap": "💚", "balanced": "💛", "smart": "❤️"}
+_TIER_RU = {
+    "cheap": "Дешёвая",
+    "balanced": "Сбалансированная",
+    "smart": "Умная",
+}
+
+
+def _tier_by_slug(slug: str) -> str | None:
+    for tier, s in MODELS.items():
+        if s == slug:
+            return tier
+    return None
+
+
+_TIER_LABEL_BY_SLUG: dict[str, str] = {
+    slug: f"{_TIER_EMOJI[tier]} {_TIER_RU[tier]}"
+    for tier, slug in MODELS.items()
+}
 
 
 @router.message(Command("usage"))
@@ -725,6 +760,104 @@ def _limit_alerts_keyboard(enabled: bool) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+_STRATEGY_META: dict[str, tuple[str, str]] = {
+    "auto": ("🚀 Автоматически (экономия)", "Автоматически"),
+    "smart": ("💎 Всегда умная", "Всегда умная"),
+    "cheap": ("💰 Всегда дешёвая", "Всегда дешёвая"),
+}
+
+
+def _settings_keyboard(bot_id: int, current: str) -> InlineKeyboardMarkup:
+    rows = []
+    for strategy in MODEL_STRATEGIES:
+        label, _ = _STRATEGY_META[strategy]
+        prefix = "✅ " if strategy == current else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{prefix}{label}",
+                    callback_data=f"settings:strategy:{bot_id}:{strategy}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _first_active_bot(client_id: int):
+    bots = await get_client_bots(client_id)
+    for b in bots:
+        if b.is_active:
+            return b
+    return None
+
+
+def _settings_text(bot_cfg, current: str) -> str:
+    _, current_label = _STRATEGY_META.get(current, _STRATEGY_META["auto"])
+    return (
+        f"Настройки бота {bot_cfg.bot_name}\n\n"
+        "Стратегия выбора модели:\n"
+        "• 🚀 Автоматически — роутер выбирает дешёвую/среднюю/умную под каждый запрос\n"
+        "• 💎 Всегда умная — качество важнее стоимости\n"
+        "• 💰 Всегда дешёвая — максимальная экономия токенов\n\n"
+        f"Текущая: {current_label}"
+    )
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await _first_active_bot(client.id)
+    if bot_cfg is None:
+        await message.answer("У вас нет активного бота. /start чтобы создать")
+        return
+    current = (bot_cfg.config_json or {}).get("model_strategy", "auto")
+    if current not in MODEL_STRATEGIES:
+        current = "auto"
+    await message.answer(
+        _settings_text(bot_cfg, current),
+        reply_markup=_settings_keyboard(bot_cfg.id, current),
+    )
+
+
+@router.callback_query(F.data.startswith("settings:strategy:"))
+async def cb_settings_strategy(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    # settings:strategy:{bot_id}:{strategy}
+    if len(parts) != 4:
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
+    try:
+        bot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    strategy = parts[3]
+    if strategy not in MODEL_STRATEGIES:
+        await callback.answer("Неизвестная стратегия", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(
+        bot_id, client.id, "model_strategy", strategy
+    )
+    if not ok:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if callback.message is not None and bot_cfg is not None:
+        await callback.message.answer(
+            _settings_text(bot_cfg, strategy),
+            reply_markup=_settings_keyboard(bot_id, strategy),
+        )
+    await callback.answer("Сохранено")
 
 
 @router.message(Command("limit_alerts"))
@@ -1838,11 +1971,22 @@ async def _handle_chat_text(
         await message.answer("Генерирую картинку...")
         img_task = asyncio.create_task(image_generator.generate(text))
 
+    strategy = (bot_cfg.config_json or {}).get("model_strategy", "auto")
     token_logs: list = []
     token_ctx = _token_accumulator.set(token_logs)
     try:
+        if strategy == "smart":
+            tier = "smart"
+        elif strategy == "cheap":
+            tier = "cheap"
+        else:
+            # Lazy import — avoids loading agents.router at module level and
+            # mirrors how other agent modules reach into pipeline.
+            from agents.router import choose_model
+
+            tier = await choose_model(text, {"bot_type": bot_cfg.bot_type})
         reply = await asyncio.to_thread(
-            run_bot_query, system_prompt, text, context_str
+            run_bot_query, system_prompt, text, context_str, tier
         )
     except Exception:
         logger.exception(

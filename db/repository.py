@@ -21,6 +21,7 @@ from db.models import (
 # new model is introduced, add it here — otherwise cost falls back to 0 and a
 # warning is logged.
 MODEL_PRICING_USD_PER_1M: dict[str, float] = {
+    "meta-llama/llama-3.3-70b-instruct": 0.12,
     "deepseek/deepseek-chat-v3.1": 0.28,
     "qwen/qwen3-235b-a22b": 0.54,
 }
@@ -542,6 +543,40 @@ async def get_usage_by_bot(
             "bot_name": r.bot_name,
             "bot_type": r.bot_type,
             "tokens": int(r.tokens or 0),
+        }
+        for r in rows
+    ]
+
+
+async def get_usage_by_model(
+    client_id: int, period_start: datetime
+) -> list[dict[str, Any]]:
+    """Per-model token + cost breakdown since period_start. Used by
+    /usage to show the multi-LLM routing split (cheap / balanced / smart)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(
+                TokenLog.model,
+                func.coalesce(
+                    func.sum(TokenLog.tokens_in + TokenLog.tokens_out), 0
+                ).label("tokens"),
+                func.coalesce(func.sum(TokenLog.cost_usd), 0.0).label("cost"),
+            )
+            .where(
+                TokenLog.client_id == client_id,
+                TokenLog.created_at >= period_start,
+            )
+            .group_by(TokenLog.model)
+            .order_by(func.sum(
+                TokenLog.tokens_in + TokenLog.tokens_out
+            ).desc())
+        )
+        rows = result.all()
+    return [
+        {
+            "model": r.model,
+            "tokens": int(r.tokens or 0),
+            "cost_usd": float(r.cost or 0.0),
         }
         for r in rows
     ]
