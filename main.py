@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -36,6 +37,7 @@ from db.repository import (
     save_consent,
 )
 from pipeline import _token_accumulator, run_bot_query, run_pipeline
+from services.image_generation import image_generator
 from services.rag import (
     add_knowledge,
     clear_knowledge,
@@ -71,6 +73,10 @@ class InlineChatStates(StatesGroup):
 
 class TeachStates(StatesGroup):
     receiving = State()
+
+
+class ImageStates(StatesGroup):
+    waiting_prompt = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -759,6 +765,47 @@ async def cmd_exit_chat(message: Message, state: FSMContext) -> None:
     await message.answer("Вы вышли из режима чата. /chat чтобы вернуться.")
 
 
+IMAGE_TRIGGERS = (
+    "нарисуй",
+    "сгенерируй картинку",
+    "создай изображение",
+    "картинку",
+    "изображение",
+)
+
+IMAGE_UNAVAILABLE_MSG = (
+    "Сервис недоступен. Добавьте ключи Fusionbrain в настройки."
+)
+
+
+def _is_image_request(text: str) -> bool:
+    lower = text.lower()
+    return any(trigger in lower for trigger in IMAGE_TRIGGERS)
+
+
+@router.message(Command("image"))
+async def cmd_image(message: Message, state: FSMContext) -> None:
+    await state.set_state(ImageStates.waiting_prompt)
+    await message.answer("Опишите картинку которую хотите создать")
+
+
+@router.message(ImageStates.waiting_prompt)
+async def on_image_prompt(message: Message, state: FSMContext) -> None:
+    prompt = (message.text or "").strip()
+    if not prompt:
+        await message.answer("Пустой запрос. Опишите картинку.")
+        return
+    await state.clear()
+    await message.answer("Генерирую картинку...")
+    img = await image_generator.generate(prompt)
+    if img is None:
+        await message.answer(IMAGE_UNAVAILABLE_MSG)
+        return
+    await message.answer_photo(
+        BufferedInputFile(img, filename="image.jpg")
+    )
+
+
 def _format_tokens_footer(stats: dict) -> str:
     tier = stats.get("tier")
     if tier is None:
@@ -857,6 +904,11 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
             f"Релевантная информация из базы знаний:\n{kb_block}"
         )
 
+    img_task: asyncio.Task | None = None
+    if _is_image_request(text):
+        await message.answer("Генерирую картинку...")
+        img_task = asyncio.create_task(image_generator.generate(text))
+
     token_logs: list = []
     token_ctx = _token_accumulator.set(token_logs)
     try:
@@ -869,6 +921,8 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
             client.id,
             bot_id,
         )
+        if img_task is not None:
+            img_task.cancel()
         await message.answer(
             "Что-то пошло не так. Попробуйте ещё раз или /exit."
         )
@@ -899,6 +953,17 @@ async def on_chat_message(message: Message, state: FSMContext) -> None:
     else:
         stats = await get_usage_stats(client.id)
         footer = _format_tokens_footer(stats)
+
+    if img_task is not None:
+        try:
+            img_bytes = await img_task
+        except Exception:
+            logger.exception("chat: image generation task failed")
+            img_bytes = None
+        if img_bytes:
+            await message.answer_photo(
+                BufferedInputFile(img_bytes, filename="image.jpg")
+            )
 
     await message.answer(reply + footer)
 
