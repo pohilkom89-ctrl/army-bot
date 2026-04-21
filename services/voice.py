@@ -1,3 +1,6 @@
+# TODO: подключим когда будут клиенты с запросом на голос.
+# Варианты: Groq (бесплатно, US) или Yandex SpeechKit (РФ, платно)
+
 import os
 
 import aiohttp
