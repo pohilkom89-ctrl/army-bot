@@ -11,6 +11,7 @@ from db.models import (
     ChatHistory,
     Client,
     ConsentLog,
+    KnowledgeChunk,
     Subscription,
     TokenLog,
 )
@@ -121,6 +122,134 @@ async def get_client_bots(client_id: int) -> list[BotConfig]:
         for bot in bots:
             session.expunge(bot)
         return bots
+
+
+async def get_bot_by_id(bot_id: int, client_id: int) -> BotConfig | None:
+    """Fetch a bot enforcing ownership — returns None if the bot doesn't
+    belong to this client. Callers should treat None as 'not found'."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is not None:
+            session.expunge(bot)
+        return bot
+
+
+async def set_bot_status(
+    bot_id: int, client_id: int, status: str
+) -> bool:
+    """Update BotConfig.status. Returns False if the bot is not owned
+    by the client or the status value is rejected."""
+    if status not in ("active", "paused"):
+        raise ValueError(f"Unknown bot status: {status}")
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        bot.status = status
+        return True
+
+
+async def delete_bot(bot_id: int, client_id: int) -> bool:
+    """Hard-delete BotConfig. ChatHistory and KnowledgeChunk are removed
+    via FK CASCADE; TokenLog rows SET NULL on bot_id (kept for billing).
+    Returns False if the bot is not owned by this client."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        await session.delete(bot)
+        return True
+
+
+async def get_bot_stats(
+    bot_id: int, client_id: int
+) -> dict[str, Any] | None:
+    """Per-bot usage summary for the dashboard card."""
+    async with get_session() as session:
+        bot_result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if bot_result.scalar_one_or_none() is None:
+            return None
+
+        # Request count = user messages.
+        req_count = await session.scalar(
+            select(func.count(ChatHistory.id)).where(
+                ChatHistory.bot_id == bot_id,
+                ChatHistory.role == "user",
+            )
+        )
+
+        # Tokens = sum across TokenLog (survives bot deletion via SET NULL,
+        # but here we only care about live bots).
+        tokens_used = await session.scalar(
+            select(
+                func.coalesce(
+                    func.sum(TokenLog.tokens_in + TokenLog.tokens_out), 0
+                )
+            ).where(TokenLog.bot_id == bot_id)
+        )
+
+        # Average assistant reply length in characters.
+        avg_reply_len = await session.scalar(
+            select(
+                func.coalesce(func.avg(func.length(ChatHistory.content)), 0)
+            ).where(
+                ChatHistory.bot_id == bot_id,
+                ChatHistory.role == "assistant",
+            )
+        )
+
+        last_activity = await session.scalar(
+            select(func.max(ChatHistory.created_at)).where(
+                ChatHistory.bot_id == bot_id
+            )
+        )
+
+        # Knowledge base: chunks + distinct sources.
+        kb_chunks = await session.scalar(
+            select(func.count(KnowledgeChunk.id)).where(
+                KnowledgeChunk.bot_id == bot_id
+            )
+        )
+        kb_sources = await session.scalar(
+            select(
+                func.count(func.distinct(KnowledgeChunk.source))
+            ).where(
+                KnowledgeChunk.bot_id == bot_id,
+                KnowledgeChunk.source.is_not(None),
+            )
+        )
+
+        return {
+            "request_count": int(req_count or 0),
+            "tokens_used": int(tokens_used or 0),
+            "avg_reply_len": int(avg_reply_len or 0),
+            "last_activity": last_activity,
+            "kb_chunks": int(kb_chunks or 0),
+            "kb_sources": int(kb_sources or 0),
+        }
 
 
 async def create_subscription(

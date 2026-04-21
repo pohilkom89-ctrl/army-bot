@@ -2,6 +2,7 @@ import asyncio
 import html
 import os
 import signal
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -28,6 +29,9 @@ from config import PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from db.repository import (
     anonymize_user,
+    delete_bot,
+    get_bot_by_id,
+    get_bot_stats,
     get_chat_history,
     get_client_bots,
     get_or_create_client,
@@ -36,6 +40,7 @@ from db.repository import (
     save_bot_config,
     save_chat_message,
     save_consent,
+    set_bot_status,
 )
 from pipeline import _token_accumulator, run_bot_query, run_pipeline
 from services.image_generation import image_generator
@@ -740,24 +745,335 @@ async def cb_post_create_mybots(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+_BOT_TYPE_RU: dict[str, str] = {
+    "parser": "Парсер",
+    "seller": "Продавец",
+    "content": "Контент",
+    "support": "Поддержка",
+}
+
+
+def _bot_type_ru(bot_type: str) -> str:
+    return _BOT_TYPE_RU.get(bot_type, bot_type)
+
+
+def _ru_plural(n: int, forms: tuple[str, str, str]) -> str:
+    """forms = (for 1, for 2-4, for 5-20)."""
+    mod100 = abs(n) % 100
+    if 11 <= mod100 <= 19:
+        return forms[2]
+    mod10 = mod100 % 10
+    if mod10 == 1:
+        return forms[0]
+    if 2 <= mod10 <= 4:
+        return forms[1]
+    return forms[2]
+
+
+def _format_relative_ru(dt: datetime | None) -> str:
+    if dt is None:
+        return "никогда"
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = (now - dt).total_seconds()
+    if delta < 60:
+        return "только что"
+    if delta < 3600:
+        m = int(delta // 60)
+        return f"{m} {_ru_plural(m, ('минуту', 'минуты', 'минут'))} назад"
+    if delta < 86400:
+        h = int(delta // 3600)
+        return f"{h} {_ru_plural(h, ('час', 'часа', 'часов'))} назад"
+    if delta < 604800:
+        d = int(delta // 86400)
+        return f"{d} {_ru_plural(d, ('день', 'дня', 'дней'))} назад"
+    return _format_ru_date(dt)
+
+
+def _bot_status_badge(bot) -> str:
+    return "✅ активен" if bot.status == "active" else "⏸ на паузе"
+
+
+def _mybots_keyboard(bots: list) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"⚙️ {b.bot_name} — управление",
+                callback_data=f"bot:manage:{b.id}",
+            )
+        ]
+        for b in bots
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_mybots_list(client_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    bots = await get_client_bots(client_id)
+    if not bots:
+        return "У вас нет ботов. /start чтобы создать", None
+
+    lines = ["🤖 Ваши боты:\n"]
+    for i, b in enumerate(bots, 1):
+        req_count = 0
+        stats = await get_bot_stats(b.id, client_id)
+        if stats is not None:
+            req_count = stats["request_count"]
+        lines.append(
+            f"{i}. {b.bot_name} ({_bot_type_ru(b.bot_type)})\n"
+            f"   Статус: {_bot_status_badge(b)}\n"
+            f"   Создан: {_format_ru_date(b.created_at)}\n"
+            f"   Запросов: {_format_num(req_count)}"
+        )
+    return "\n\n".join(lines), _mybots_keyboard(bots)
+
+
 @router.message(Command("mybots"))
 async def cmd_mybots(message: Message) -> None:
     user = message.from_user
     if user is None:
         return
     client = await get_or_create_client(user.id, user.username)
-    bots = await get_client_bots(client.id)
-    if not bots:
-        await message.answer(
-            "У вас нет ботов. Создайте бота командой /start"
+    text, kb = await _render_mybots_list(client.id)
+    await message.answer(text, reply_markup=kb)
+
+
+def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
+    pause_btn = (
+        InlineKeyboardButton(
+            text="▶️ Возобновить",
+            callback_data=f"bot:resume:{bot.id}",
+        )
+        if bot.status == "paused"
+        else InlineKeyboardButton(
+            text="⏸ Пауза",
+            callback_data=f"bot:pause:{bot.id}",
+        )
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать",
+                    callback_data=f"bot:edit:{bot.id}",
+                ),
+                pause_btn,
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"bot:delete:{bot.id}",
+                ),
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data="bot:list",
+                ),
+            ],
+        ]
+    )
+
+
+def _render_bot_detail(bot, stats: dict) -> str:
+    return (
+        f"🤖 {bot.bot_name} — {_bot_type_ru(bot.bot_type)}\n"
+        f"Статус: {_bot_status_badge(bot)}\n\n"
+        "📊 Статистика:\n"
+        f"• Всего запросов: {_format_num(stats['request_count'])}\n"
+        f"• Токенов использовано: {_format_num(stats['tokens_used'])}\n"
+        f"• Средняя длина ответа: {_format_num(stats['avg_reply_len'])} символов\n"
+        f"• Последняя активность: {_format_relative_ru(stats['last_activity'])}\n\n"
+        "💾 База знаний:\n"
+        f"• {_format_num(stats['kb_chunks'])} "
+        f"{_ru_plural(stats['kb_chunks'], ('фрагмент', 'фрагмента', 'фрагментов'))} "
+        f"из {_format_num(stats['kb_sources'])} "
+        f"{_ru_plural(stats['kb_sources'], ('источника', 'источников', 'источников'))}\n\n"
+        "⚙️ Действия:"
+    )
+
+
+async def _answer_bot_detail(callback: CallbackQuery, client_id: int, bot_id: int) -> None:
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    stats = await get_bot_stats(bot_id, client_id)
+    if bot_cfg is None or stats is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    if callback.message is not None:
+        await callback.message.answer(
+            _render_bot_detail(bot_cfg, stats),
+            reply_markup=_bot_detail_keyboard(bot_cfg),
+        )
+
+
+@router.callback_query(F.data.startswith("bot:manage:"))
+async def cb_bot_manage(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    await _answer_bot_detail(callback, client.id, bot_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bot:list")
+async def cb_bot_list(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    client = await get_or_create_client(user.id, user.username)
+    text, kb = await _render_mybots_list(client.id)
+    if callback.message is not None:
+        await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:pause:"))
+async def cb_bot_pause(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await set_bot_status(bot_id, client.id, "paused")
+    if not ok:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    if callback.message is not None:
+        await callback.message.answer(
+            "⏸ Бот поставлен на паузу.\n"
+            "Новые запросы обрабатываться не будут.\n"
+            "/mybots чтобы возобновить"
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:resume:"))
+async def cb_bot_resume(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await set_bot_status(bot_id, client.id, "active")
+    if not ok:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    if callback.message is not None:
+        await callback.message.answer("✅ Бот снова работает")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:edit:"))
+async def cb_bot_edit(callback: CallbackQuery) -> None:
+    # Placeholder: full edit flow is Step 2 of block 6.
+    if callback.message is not None:
+        await callback.message.answer(
+            "✏️ Редактирование появится на следующем шаге."
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:delete:"))
+async def cb_bot_delete_ask(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    # bot:delete:{id} (first click)  vs  bot:delete_yes/no:{id} — handled by
+    # other callbacks below. Here we only react to the first-click variant.
+    if len(parts) != 3 or parts[1] != "delete":
+        await callback.answer()
+        return
+    try:
+        bot_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, удалить",
+                    callback_data=f"bot:delete_yes:{bot_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=f"bot:delete_no:{bot_id}",
+                ),
+            ]
+        ]
+    )
+    if callback.message is not None:
+        await callback.message.answer(
+            f"⚠️ Точно удалить {bot_cfg.bot_name}?\n"
+            "Все знания и история будут утеряны.",
+            reply_markup=kb,
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:delete_yes:"))
+async def cb_bot_delete_yes(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    try:
+        ok = await delete_bot(bot_id, client.id)
+    except Exception:
+        logger.exception(
+            "mybots: delete_bot failed client_id={} bot_id={}",
+            client.id,
+            bot_id,
+        )
+        await callback.answer(
+            "Не удалось удалить бота. Попробуйте позже.", show_alert=True
         )
         return
-    lines = ["🤖 Ваши боты:\n"]
-    for b in bots:
-        status = "✅" if b.is_active else "⏸"
-        lines.append(f"{status} {b.bot_name} — {b.bot_type}")
-    lines.append("\n/chat — общаться с активным ботом")
-    await message.answer("\n".join(lines))
+    if not ok:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    logger.info(
+        "mybots: bot deleted client_id={} bot_id={}", client.id, bot_id
+    )
+    if callback.message is not None:
+        await callback.message.answer("🗑 Бот удалён")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:delete_no:"))
+async def cb_bot_delete_no(callback: CallbackQuery) -> None:
+    if callback.message is not None:
+        await callback.message.answer("Отменено.")
+    await callback.answer()
 
 
 @router.message(Command("exit"), InlineChatStates.chatting)
@@ -877,6 +1193,9 @@ async def _handle_chat_text(
         await message.answer(
             "Бот больше не активен. /chat чтобы выбрать другой."
         )
+        return
+    if bot_cfg.status == "paused":
+        await message.answer("⏸ Бот на паузе. /mybots чтобы включить")
         return
 
     admin = is_admin(user.id)
@@ -1051,6 +1370,11 @@ async def on_teach_message(message: Message, state: FSMContext) -> None:
         await message.answer("Сессия обучения потеряна. /teach чтобы начать заново.")
         return
     client = await get_or_create_client(user.id, user.username)
+
+    teach_bot = await get_bot_by_id(bot_id, client.id)
+    if teach_bot is not None and teach_bot.status == "paused":
+        await message.answer("⏸ Бот на паузе. /mybots чтобы включить")
+        return
 
     raw_text = ""
     source = "text"

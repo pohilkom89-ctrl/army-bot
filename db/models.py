@@ -71,6 +71,9 @@ class BotConfig(Base):
     config_json = Column(JSON, nullable=False, default=dict)
 
     is_active = Column(Boolean, nullable=False, default=True)
+    # active | paused — управляется клиентом через /mybots (is_active остаётся
+    # булевым soft-delete-флагом, status отражает runtime-состояние).
+    status = Column(String(32), nullable=False, default="active")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     client = relationship("Client", back_populates="bots")
