@@ -130,6 +130,77 @@ class RequirementsSchema(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict)
 
 
+COMPLETENESS_SYSTEM_PROMPT = """Ты проверяешь качество собранных требований для бота.
+Оцени насколько полны ответы клиента.
+Если каких-то важных деталей не хватает —
+верни список из 1-3 уточняющих вопросов.
+Если всё достаточно — верни пустой список.
+
+Примеры когда нужны уточнения:
+- Продавец не указал цены на товары
+- Поддержка не дала FAQ (ответила одним словом)
+- Контент-бот не описал целевую аудиторию
+- Парсер не дал конкретных ссылок на конкурентов
+
+Верни ТОЛЬКО JSON: {"questions": ["вопрос1", "вопрос2"]}"""
+
+
+class CompletenessSchema(BaseModel):
+    questions: list[str] = Field(default_factory=list)
+
+
+def _format_requirements_for_check(requirements: dict[str, Any]) -> str:
+    """Render the questionnaire answers as a readable Q&A block."""
+    lines: list[str] = []
+    for qid in sorted(
+        requirements.keys(),
+        key=lambda k: int(k) if str(k).isdigit() else 0,
+    ):
+        entry = requirements[qid]
+        if isinstance(entry, dict):
+            q = entry.get("question", "")
+            a = entry.get("answer", "")
+            lines.append(f"Q: {q}\nA: {a}")
+        else:
+            lines.append(f"Q{qid}: {entry}")
+    return "\n\n".join(lines)
+
+
+def check_completeness(requirements: dict[str, Any]) -> list[str]:
+    """Ask the analyst LLM whether the client's answers are complete enough.
+
+    Returns up to 3 clarifying questions, or an empty list if no follow-up
+    is needed. On any LLM/parse failure, returns [] — clarification is an
+    enhancement, not a hard gate, so failure falls through to ask_bot_token.
+    """
+    logger.info(
+        "check_completeness: checking %d answers", len(requirements)
+    )
+    user_message = (
+        "Ответы клиента на анкету:\n\n"
+        + _format_requirements_for_check(requirements)
+    )
+
+    try:
+        raw = run_agent(
+            system=COMPLETENESS_SYSTEM_PROMPT, user_message=user_message
+        )
+        parsed = json.loads(_strip_fence(raw))
+        validated = CompletenessSchema.model_validate(parsed)
+    except (json.JSONDecodeError, ValidationError) as err:
+        logger.warning("check_completeness: invalid output: %s", err)
+        return []
+    except Exception:
+        logger.exception("check_completeness: LLM call failed")
+        return []
+
+    questions = [q.strip() for q in validated.questions if q and q.strip()][:3]
+    logger.info(
+        "check_completeness: %d clarifying questions", len(questions)
+    )
+    return questions
+
+
 def _strip_fence(text: str) -> str:
     t = text.strip()
     if not t.startswith("```"):

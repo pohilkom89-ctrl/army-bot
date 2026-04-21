@@ -21,6 +21,7 @@ from aiogram.types import (
 from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
 
+from agents.analyst import check_completeness
 from billing import create_payment
 from config import PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
@@ -60,6 +61,7 @@ class IntakeStates(StatesGroup):
     consent = State()
     ask_type = State()
     answering = State()
+    clarifying = State()
     ask_bot_token = State()
     processing = State()
 
@@ -185,6 +187,34 @@ async def on_bot_type_chosen(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
+def _redact_sensitive(raw_answers: dict) -> tuple[dict, int]:
+    """Strip sensitive answer values before sending to LLM. Returns
+    (safe_answers, sensitive_count). Question text is preserved so the
+    analyst can mark the secret as "provided" via a placeholder flag."""
+    llm_answers: dict = {}
+    sensitive_count = 0
+    for qid, entry in raw_answers.items():
+        if entry.get("sensitive") and entry.get("answer"):
+            sensitive_count += 1
+            llm_answers[qid] = {
+                "question": entry["question"],
+                "answer": "<user provided secret, redacted>",
+            }
+        else:
+            llm_answers[qid] = {
+                "question": entry["question"],
+                "answer": entry.get("answer", ""),
+            }
+    return llm_answers, sensitive_count
+
+
+ASK_TOKEN_PROMPT = (
+    "Отлично, все вопросы собраны!\n\n"
+    "Теперь создайте бота у @BotFather командой /newbot, "
+    "получите токен и отправьте его сюда."
+)
+
+
 @router.message(IntakeStates.answering)
 async def on_answer(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
@@ -211,12 +241,63 @@ async def on_answer(message: Message, state: FSMContext) -> None:
         )
         return
 
+    llm_answers, _ = _redact_sensitive(answers)
+    try:
+        clarifying_qs = await asyncio.to_thread(
+            check_completeness, llm_answers
+        )
+    except Exception:
+        logger.exception("intake: check_completeness failed")
+        clarifying_qs = []
+
+    if clarifying_qs:
+        await state.update_data(
+            clarification_questions=clarifying_qs,
+            clarification_current=0,
+            clarification_answers={},
+        )
+        await state.set_state(IntakeStates.clarifying)
+        await message.answer(
+            "Почти готово! Уточню несколько деталей для "
+            "лучшего результата:"
+        )
+        await message.answer(clarifying_qs[0])
+        return
+
     await state.set_state(IntakeStates.ask_bot_token)
-    await message.answer(
-        "Отлично, все вопросы собраны!\n\n"
-        "Теперь создайте бота у @BotFather командой /newbot, "
-        "получите токен и отправьте его сюда."
+    await message.answer(ASK_TOKEN_PROMPT)
+
+
+@router.message(IntakeStates.clarifying)
+async def on_clarifying(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    questions = data.get("clarification_questions") or []
+    idx = data.get("clarification_current", 0)
+    answers = dict(data.get("clarification_answers") or {})
+
+    if idx >= len(questions):
+        await state.set_state(IntakeStates.ask_bot_token)
+        await message.answer(ASK_TOKEN_PROMPT)
+        return
+
+    answer_text = (message.text or "").strip()
+    answers[str(idx)] = {
+        "question": questions[idx],
+        "answer": answer_text,
+    }
+
+    next_idx = idx + 1
+    await state.update_data(
+        clarification_answers=answers,
+        clarification_current=next_idx,
     )
+
+    if next_idx < len(questions):
+        await message.answer(questions[next_idx])
+        return
+
+    await state.set_state(IntakeStates.ask_bot_token)
+    await message.answer(ASK_TOKEN_PROMPT)
 
 
 @router.message(IntakeStates.ask_bot_token)
@@ -238,29 +319,15 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     bot_type = data.get("bot_type")
     raw_answers: dict = data.get("answers") or {}
+    clarification_answers: dict = data.get("clarification_answers") or {}
 
-    # Defense-in-depth: strip sensitive answer *values* (API tokens, keys)
-    # before they reach the LLM. Question text is preserved so the analyst
-    # can mark the secret as "provided" via a placeholder flag.
-    llm_answers = {}
-    sensitive_count = 0
-    for qid, entry in raw_answers.items():
-        if entry.get("sensitive") and entry.get("answer"):
-            sensitive_count += 1
-            llm_answers[qid] = {
-                "question": entry["question"],
-                "answer": "<user provided secret, redacted>",
-            }
-        else:
-            llm_answers[qid] = {
-                "question": entry["question"],
-                "answer": entry.get("answer", ""),
-            }
+    llm_answers, sensitive_count = _redact_sensitive(raw_answers)
 
     pipeline_input = {
         "bot_type": bot_type,
         "questionnaire_type": bot_type,
         "answers": llm_answers,
+        "clarification_answers": clarification_answers,
     }
 
     await state.set_state(IntakeStates.processing)
@@ -293,6 +360,7 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
                 # Raw questionnaire answers with unredacted secrets.
                 # Stored only in DB, never passed to LLM.
                 "questionnaire_answers": raw_answers,
+                "clarification_answers": clarification_answers,
             },
             bot_token=bot_token,
         )

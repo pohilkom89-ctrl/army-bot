@@ -24,6 +24,7 @@ _ALLOWED_INPUT_KEYS = frozenset(
         "tone",
         "questionnaire_type",
         "answers",
+        "clarification_answers",
     }
 )
 
@@ -134,6 +135,21 @@ def _format_raw_input(safe_answers: dict[str, Any]) -> str:
                 lines.append(f"Q{qid}: {q}\nA{qid}: {a}")
             else:
                 lines.append(f"Q{qid}: {entry}")
+
+        clarifications = safe_answers.get("clarification_answers")
+        if isinstance(clarifications, dict) and clarifications:
+            lines.append("\nУточняющие вопросы и ответы:")
+            for cid in sorted(
+                clarifications.keys(),
+                key=lambda k: int(k) if str(k).isdigit() else 0,
+            ):
+                entry = clarifications[cid]
+                if isinstance(entry, dict):
+                    q = entry.get("question", "")
+                    a = entry.get("answer", "")
+                    lines.append(f"Q: {q}\nA: {a}")
+                else:
+                    lines.append(f"- {entry}")
         return "\n".join(lines)
 
     for key in ("purpose", "audience", "target_audience", "key_features", "tone"):
