@@ -21,7 +21,6 @@ from aiogram.types import (
 from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
 
-from agents.analyst import check_completeness
 from billing import create_payment
 from config import PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
@@ -242,6 +241,10 @@ async def on_answer(message: Message, state: FSMContext) -> None:
         return
 
     llm_answers, _ = _redact_sensitive(answers)
+    # Import lazily — top-level import would make main.py load agents.analyst
+    # before pipeline.py, breaking the existing analyst<->pipeline import dance.
+    from agents.analyst import check_completeness
+
     try:
         clarifying_qs = await asyncio.to_thread(
             check_completeness, llm_answers
