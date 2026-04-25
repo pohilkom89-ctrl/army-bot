@@ -1,13 +1,19 @@
+import asyncio
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from loguru import logger
 from yookassa import Configuration, Payment
 
 from config import CYCLES, PLANS
-from db.repository import create_subscription
+from db.repository import create_subscription, find_subscription_by_payment_id
+
+# How long we're willing to wait for YooKassa's API to confirm a payment
+# status before giving up. Webhook handlers should not block on remote
+# failures — better to log and skip verification than to delay 30s.
+_VERIFY_TIMEOUT_SECONDS = 5.0
 
 # Billing cycle → how long a paid subscription lasts before it needs renewal.
 # Not in config.py because it's an infrastructure concern, not a pricing one.
@@ -87,6 +93,38 @@ def check_payment(payment_id: str) -> str:
     return payment.status
 
 
+async def verify_payment_status(
+    payment_id: str, expected_status: str
+) -> Optional[bool]:
+    """Round-trip to YooKassa to confirm a payment is really in
+    expected_status. Used as the second authentication layer for
+    webhooks (alongside IP-allowlist) — substitutes for the missing
+    HMAC. Returns:
+      True  — YooKassa confirmed payment is in expected_status
+      False — YooKassa returned a different status (likely spoofed webhook)
+      None  — could not verify (missing credentials / timeout / API error);
+              caller should log and accept defensively rather than block.
+    """
+    if not (os.getenv("YUKASSA_SHOP_ID") and os.getenv("YUKASSA_SECRET_KEY")):
+        return None
+    try:
+        actual = await asyncio.wait_for(
+            asyncio.to_thread(check_payment, payment_id),
+            timeout=_VERIFY_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "billing: verify_payment_status timeout payment_id={}", payment_id
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "billing: verify_payment_status failed payment_id={}", payment_id
+        )
+        return None
+    return actual == expected_status
+
+
 async def handle_webhook(data: dict[str, Any]) -> None:
     event = data.get("event")
     obj = data.get("object") or {}
@@ -103,6 +141,19 @@ async def handle_webhook(data: dict[str, Any]) -> None:
 
     if event != "payment.succeeded" or status != "succeeded":
         return
+
+    # Idempotency: YooKassa retries webhook delivery on any non-2xx and
+    # occasionally on 2xx too. Without this check a single payment could
+    # spawn multiple Subscription rows.
+    if payment_id:
+        existing = await find_subscription_by_payment_id(payment_id)
+        if existing is not None:
+            logger.info(
+                "billing: webhook duplicate payment_id={} (sub_id={}) — skipping",
+                payment_id,
+                existing.id,
+            )
+            return
 
     raw_client_id = metadata.get("client_id")
     try:

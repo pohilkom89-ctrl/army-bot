@@ -343,6 +343,23 @@ async def create_subscription(
         return sub
 
 
+async def find_subscription_by_payment_id(
+    payment_id: str,
+) -> Optional[Subscription]:
+    """Lookup a subscription by its yukassa_payment_id. Used by the
+    webhook handler to short-circuit duplicates (YooKassa retries
+    delivery on non-2xx responses, and even on success some retries
+    slip through). Returns None if no subscription exists for this
+    payment yet."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Subscription).where(
+                Subscription.yukassa_payment_id == payment_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+
 def _maybe_reset_tokens(sub: Subscription, now: datetime) -> None:
     """Zero tokens_used and advance reset_at if the period has elapsed."""
     if sub.tokens_reset_at is None:
