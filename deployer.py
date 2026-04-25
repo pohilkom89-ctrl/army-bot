@@ -51,6 +51,7 @@ RUN pip install --no-cache-dir \\
 
 COPY main.py /app/main.py
 COPY usage_reporter.py /app/usage_reporter.py
+COPY system_prompt.txt /app/system_prompt.txt
 
 CMD ["python", "main.py"]
 """
@@ -98,6 +99,17 @@ def _ensure_runtime_files(bot_dir: Path) -> None:
     shutil.copy2(src, bot_dir / "usage_reporter.py")
 
 
+def _write_system_prompt(bot_dir: Path, system_prompt: str) -> None:
+    """Persist the bot's current system_prompt to a file in the build
+    context. The container reads this at startup — keeps the runtime
+    in sync with /mybots → edit prompt without hardcoding the text in
+    main.py (closes tech debt 19)."""
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "system_prompt.txt").write_text(
+        system_prompt or "", encoding="utf-8"
+    )
+
+
 def build_bot_image(bot_dir: Path, bot_id: int) -> str:
     """Build the runtime image for this bot. Returns the tag. Sync — call
     via asyncio.to_thread from async code."""
@@ -138,6 +150,7 @@ async def deploy_bot(bot_id: int) -> str:
     if not internal_api_key:
         raise RuntimeError("INTERNAL_API_KEY is required to deploy bots")
     factory_url = os.getenv("FACTORY_URL", "http://host.docker.internal:8080")
+    system_prompt = bot.system_prompt or ""
 
     container_id = await asyncio.to_thread(
         _deploy_sync,
@@ -147,6 +160,7 @@ async def deploy_bot(bot_id: int) -> str:
         model_bots,
         factory_url,
         internal_api_key,
+        system_prompt,
     )
 
     # Give the container a moment to make its first Telegram poll, then
@@ -185,6 +199,7 @@ def _deploy_sync(
     model_bots: str,
     factory_url: str,
     internal_api_key: str,
+    system_prompt: str,
 ) -> str:
     bot_dir = _bot_dir(bot_id)
     name = _container_name(bot_id)
@@ -212,6 +227,7 @@ def _deploy_sync(
             f"deployer: {bot_dir / 'main.py'} not found — "
             "call prepare_bot_files first"
         )
+    _write_system_prompt(bot_dir, system_prompt)
     build_bot_image(bot_dir, bot_id)
     tag = _image_tag(bot_id)
 
@@ -256,6 +272,49 @@ async def stop_bot(bot_id: int) -> None:
     """Stop the container but leave it on disk so deploy_bot can fast-start
     it on resume. Noop if the container does not exist."""
     await asyncio.to_thread(_stop_sync, bot_id)
+
+
+async def redeploy_bot(bot_id: int) -> str:
+    """Force a fresh build + restart for an existing bot. Used after edits
+    to system_prompt / config (where the build context changes but main.py
+    structure does not). Skips the deploy if the bot is paused — the prompt
+    on disk will be picked up on next resume.
+
+    Unlike remove_bot, this does NOT wipe bots/{bot_id}/ — only the running
+    container is removed so deploy_bot rebuilds the image from current files.
+    Returns 'paused-skipped' when the bot is paused, otherwise the new
+    container id.
+    """
+    bot = await get_bot_by_id_any(bot_id)
+    if bot is None:
+        raise RuntimeError(f"redeploy_bot: no BotConfig for bot_id={bot_id}")
+    if (getattr(bot, "status", None) or "").lower() == "paused":
+        logger.info(
+            "redeploy_bot: bot_id={} paused — config will apply on resume",
+            bot_id,
+        )
+        return "paused-skipped"
+    await asyncio.to_thread(_remove_container_only_sync, bot_id)
+    return await deploy_bot(bot_id)
+
+
+def _remove_container_only_sync(bot_id: int) -> None:
+    """Drop the running container so deploy_bot takes the rebuild branch.
+    Image and bot_dir stay intact; only the container instance is removed."""
+    name = _container_name(bot_id)
+    if not docker.container.exists(name):
+        return
+    state = _container_state(name)
+    if state == "running":
+        try:
+            docker.container.stop(name, time=10)
+        except Exception:
+            logger.exception("deployer: stop before remove failed for {}", name)
+    try:
+        docker.container.remove(name, force=True)
+        logger.info("deployer: container {} removed (image kept)", name)
+    except Exception:
+        logger.exception("deployer: container remove failed for {}", name)
 
 
 def _stop_sync(bot_id: int) -> None:

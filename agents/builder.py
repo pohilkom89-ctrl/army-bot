@@ -25,6 +25,11 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * BOT_TOKEN
   * OPENROUTER_API_KEY
   * Если ключа нет — падай при старте с понятной ошибкой (RuntimeError)
+- Системный промпт ОБЯЗАТЕЛЬНО читай из файла, НЕ хардкодь литералом:
+  * `from pathlib import Path`
+  * `SYSTEM_PROMPT = Path("/app/system_prompt.txt").read_text(encoding="utf-8").strip()`
+  * Файл `system_prompt.txt` уже лежит в /app, deployer кладёт туда актуальный текст из БД при каждом build
+  * НЕ копируй текст промпта в исходник — он будет рассинхронизирован после `/mybots → редактировать → промпт`
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота

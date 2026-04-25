@@ -28,6 +28,7 @@ from config import MODELS, MODEL_STRATEGIES, PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from deployer import (
     deploy_bot,
+    redeploy_bot,
     get_bot_logs,
     get_bot_status,
     prepare_bot_files,
@@ -1532,6 +1533,7 @@ async def on_edit_prompt(message: Message, state: FSMContext) -> None:
         len(new_prompt),
     )
     await message.answer("✅ Системный промпт обновлён. /mybots")
+    await _redeploy_after_edit(bot_id, message)
 
 
 def _edit_style_keyboard(bot_id: int) -> InlineKeyboardMarkup:
@@ -1560,6 +1562,28 @@ async def cb_bot_edit_style(callback: CallbackQuery) -> None:
             reply_markup=_edit_style_keyboard(bot_id),
         )
     await callback.answer()
+
+
+async def _redeploy_after_edit(bot_id: int, message: Message) -> None:
+    """Force a container rebuild so changes to system_prompt take effect
+    in runtime. Called after edits that update BotConfig.system_prompt
+    (direct prompt edit / regenerate-driven style/forbidden updates).
+    Failures are logged but never raised — DB write already succeeded."""
+    try:
+        result = await redeploy_bot(bot_id)
+    except Exception:
+        logger.exception("redeploy_bot failed bot_id={}", bot_id)
+        await message.answer(
+            "⚠️ Изменения сохранены в БД, но автоперезапуск контейнера не "
+            "сработал. /mybots → пауза → возобновить."
+        )
+        return
+    if result == "paused-skipped":
+        await message.answer(
+            "ℹ️ Бот на паузе — новый промпт применится при возобновлении."
+        )
+    else:
+        await message.answer("🔄 Контейнер пересобран, новый промпт активен.")
 
 
 async def _regenerate_and_save(bot_id: int, client_id: int) -> bool:
@@ -1623,6 +1647,8 @@ async def cb_bot_edit_style_set(callback: CallbackQuery) -> None:
             else "⚠️ Не удалось регенерировать промпт — стиль сохранён, "
             "но старый промпт остался. /mybots"
         )
+        if regenerated:
+            await _redeploy_after_edit(bot_id, callback.message)
     await callback.answer()
 
 
@@ -1681,6 +1707,8 @@ async def on_edit_forbidden(message: Message, state: FSMContext) -> None:
         else "⚠️ Не удалось регенерировать промпт — запреты сохранены, "
         "но старый промпт остался. /mybots"
     )
+    if regenerated:
+        await _redeploy_after_edit(bot_id, message)
 
 
 @router.callback_query(F.data.startswith("bot:edit_scripts:"))
