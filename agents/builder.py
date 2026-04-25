@@ -28,6 +28,12 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота
+- Учёт токенов: ПОСЛЕ каждого вызова `client.chat.completions.create(...)`
+  * импортируй `from usage_reporter import report_usage` (модуль уже лежит в /app, ничего создавать не нужно)
+  * сразу после получения response: `asyncio.create_task(report_usage(response.usage, model_used))`
+  * вызов fire-and-forget — НЕ await, не блокирует ответ пользователю
+  * `model_used` — та же строка что передана в `model=...`, обычно `OPENROUTER_MODEL_BOTS`
+  * НЕ пиши свою функцию для этого, НЕ импортируй ничего другого, НЕ делай try/except — usage_reporter сам обрабатывает все сбои
 - Каждый хендлер оборачивай в try/except, ошибки логируй через logger.exception(...)
 - Идентификаторы и комментарии — на английском языке
 - Точка входа:

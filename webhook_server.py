@@ -1,11 +1,13 @@
 import asyncio
 import ipaddress
 import os
+import secrets
 
 from aiohttp import web
 from loguru import logger
 
 from billing import handle_webhook
+from db.repository import get_bot_by_id_any, log_tokens
 
 # YooKassa delivers webhooks from this fixed set of networks. Anything else is
 # rejected at the network layer before we touch the payload — defence-in-depth
@@ -50,9 +52,60 @@ async def yukassa_webhook(request: web.Request) -> web.Response:
     return web.Response(status=200, text="ok")
 
 
+async def log_tokens_endpoint(request: web.Request) -> web.Response:
+    expected = os.getenv("INTERNAL_API_KEY", "")
+    if not expected:
+        logger.error("log_tokens: INTERNAL_API_KEY not set on factory")
+        return web.Response(status=503, text="not configured")
+
+    provided = request.headers.get("X-Internal-Key", "")
+    if not secrets.compare_digest(provided, expected):
+        logger.warning("log_tokens: bad key from {}", request.remote)
+        return web.Response(status=401, text="unauthorized")
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400, text="invalid json")
+
+    try:
+        bot_id = int(data["bot_id"])
+        tokens_in = int(data["tokens_in"])
+        tokens_out = int(data["tokens_out"])
+        model = str(data["model"])
+    except (KeyError, ValueError, TypeError) as e:
+        logger.warning("log_tokens: bad payload — {}", e)
+        return web.Response(status=400, text="invalid payload")
+
+    bot = await get_bot_by_id_any(bot_id)
+    if bot is None:
+        # Idempotent: orphan reports (e.g. after bot deletion) shouldn't make
+        # the client retry forever. Log loudly and return 200.
+        logger.warning(
+            "log_tokens: unknown bot_id={} — accepting as no-op (idempotent)",
+            bot_id,
+        )
+        return web.Response(status=200, text="ok (unknown bot_id, ignored)")
+
+    try:
+        await log_tokens(
+            client_id=bot.client_id,
+            bot_id=bot_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            model=model,
+        )
+    except Exception:
+        logger.exception("log_tokens: persisting failed bot_id={}", bot_id)
+        return web.Response(status=500, text="logging failed")
+
+    return web.Response(status=200, text="ok")
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/webhook/yukassa", yukassa_webhook)
+    app.router.add_post("/internal/log_tokens", log_tokens_endpoint)
     return app
 
 

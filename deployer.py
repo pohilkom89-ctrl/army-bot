@@ -23,6 +23,7 @@ from config import CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT
 from db.repository import get_bot_by_id_any
 
 BOTS_DIR = Path("bots")
+RUNTIME_DIR = Path("bot_runtime")
 
 # Runtime image for generated bots — superset of packages the builder agent
 # might emit code against (aiogram/openai + HTTP/DB/image/HTML tooling).
@@ -49,6 +50,7 @@ RUN pip install --no-cache-dir \\
     beautifulsoup4==4.12.3
 
 COPY main.py /app/main.py
+COPY usage_reporter.py /app/usage_reporter.py
 
 CMD ["python", "main.py"]
 """
@@ -71,6 +73,7 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "main.py").write_text(bot_code, encoding="utf-8")
     _write_dockerfile(bot_id)
+    _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
     return bot_dir
 
@@ -84,6 +87,17 @@ def _write_dockerfile(bot_id: int) -> Path:
     return dockerfile
 
 
+def _ensure_runtime_files(bot_dir: Path) -> None:
+    """Copy shared runtime helpers into the bot's Docker context. Always
+    overwrites so updates to the helper propagate on the next rebuild."""
+    src = RUNTIME_DIR / "usage_reporter.py"
+    if not src.exists():
+        raise FileNotFoundError(
+            f"deployer: runtime helper {src} missing — cannot build bot images"
+        )
+    shutil.copy2(src, bot_dir / "usage_reporter.py")
+
+
 def build_bot_image(bot_dir: Path, bot_id: int) -> str:
     """Build the runtime image for this bot. Returns the tag. Sync — call
     via asyncio.to_thread from async code."""
@@ -93,8 +107,10 @@ def build_bot_image(bot_dir: Path, bot_id: int) -> str:
             f"deployer: {bot_dir / 'main.py'} not found — "
             "call prepare_bot_files first"
         )
-    if not (bot_dir / "Dockerfile").exists():
-        _write_dockerfile(bot_id)
+    # Always refresh Dockerfile + runtime helpers so rebuilds pick up
+    # template changes without needing to re-run prepare_bot_files.
+    _write_dockerfile(bot_id)
+    _ensure_runtime_files(bot_dir)
     logger.info("deployer: building image {}", tag)
     docker.build(context_path=str(bot_dir), tags=[tag])
     return tag
@@ -118,9 +134,19 @@ async def deploy_bot(bot_id: int) -> str:
     if not openrouter_key:
         raise RuntimeError("OPENROUTER_API_KEY is required to deploy bots")
     model_bots = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
+    internal_api_key = os.getenv("INTERNAL_API_KEY")
+    if not internal_api_key:
+        raise RuntimeError("INTERNAL_API_KEY is required to deploy bots")
+    factory_url = os.getenv("FACTORY_URL", "http://host.docker.internal:8080")
 
     container_id = await asyncio.to_thread(
-        _deploy_sync, bot_id, bot_token, openrouter_key, model_bots
+        _deploy_sync,
+        bot_id,
+        bot_token,
+        openrouter_key,
+        model_bots,
+        factory_url,
+        internal_api_key,
     )
 
     # Give the container a moment to make its first Telegram poll, then
@@ -157,6 +183,8 @@ def _deploy_sync(
     bot_token: str,
     openrouter_key: str,
     model_bots: str,
+    factory_url: str,
+    internal_api_key: str,
 ) -> str:
     bot_dir = _bot_dir(bot_id)
     name = _container_name(bot_id)
@@ -195,10 +223,17 @@ def _deploy_sync(
         restart="unless-stopped",
         cpus=CONTAINER_CPU_LIMIT,
         memory=CONTAINER_MEMORY_LIMIT,
+        # On Linux host.docker.internal isn't auto-resolvable like on
+        # Docker Desktop. host-gateway makes the bridge gateway IP
+        # available so containers can reach the factory's webhook server.
+        add_hosts=[("host.docker.internal", "host-gateway")],
         envs={
             "BOT_TOKEN": bot_token,
+            "BOT_ID": str(bot_id),
             "OPENROUTER_API_KEY": openrouter_key,
             "OPENROUTER_MODEL_BOTS": model_bots,
+            "FACTORY_URL": factory_url,
+            "INTERNAL_API_KEY": internal_api_key,
         },
     )
     container_id = getattr(container, "id", str(container))
