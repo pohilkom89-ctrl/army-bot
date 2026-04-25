@@ -132,6 +132,82 @@ def _format_question(q: dict, idx: int, total: int) -> str:
 router = Router()
 
 
+# Persistent main menu shown after consent. 4×2 layout. Admins see
+# "💎 Безлимит (админ)" instead of "💎 Тариф" — they have an unlimited
+# tier and don't need /subscribe.
+_MAIN_MENU_BUTTONS: tuple[tuple[tuple[str, str], ...], ...] = (
+    (("💬 Чат с ботом", "/chat"), ("🤖 Мои боты", "/mybots")),
+    (("📊 Статистика", "/usage"), ("📚 Обучение", "/teach")),
+    (("⚙️ Настройки", "/settings"), ("💎 Тариф", "/subscribe")),
+    (("➕ Создать бота", "/start"), ("❓ Помощь", "/help")),
+)
+_MAIN_MENU_ADMIN_LABEL = "💎 Безлимит (админ)"
+_MAIN_MENU_LABELS_ALL: set[str] = {
+    label for row in _MAIN_MENU_BUTTONS for label, _cmd in row
+} | {_MAIN_MENU_ADMIN_LABEL}
+
+
+def _main_menu_keyboard(is_admin_user: bool = False) -> ReplyKeyboardMarkup:
+    """Persistent main menu (4×2). For admins the 💎 Тариф slot is
+    swapped to a non-actionable 'Безлимит (админ)' label."""
+    rows = []
+    for row in _MAIN_MENU_BUTTONS:
+        kb_row = []
+        for label, _cmd in row:
+            if is_admin_user and label == "💎 Тариф":
+                kb_row.append(KeyboardButton(text=_MAIN_MENU_ADMIN_LABEL))
+            else:
+                kb_row.append(KeyboardButton(text=label))
+        rows.append(kb_row)
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+@router.message(F.text.in_(_MAIN_MENU_LABELS_ALL))
+async def on_main_menu_button(message: Message, state: FSMContext) -> None:
+    """FSM intercept (variant β): tapping any main-menu button at any
+    point clears the current FSM state and dispatches to the matching
+    command handler. Registered FIRST in the router so it fires before
+    any waiting-for-input FSM handler steals the message.
+
+    Without this, taps during intake/edit FSMs would be swallowed by
+    `on_answer` / `on_edit_*` and the user would feel the menu is broken.
+    """
+    user = message.from_user
+    label = (message.text or "").strip()
+    is_admin_user = bool(user and is_admin(user.id))
+
+    if label == _MAIN_MENU_ADMIN_LABEL:
+        await state.clear()
+        await message.answer(
+            "💎 У вас безлимитный тариф (admin). /usage — статистика по ботам.",
+            reply_markup=_main_menu_keyboard(is_admin_user=True),
+        )
+        return
+
+    await state.clear()
+
+    if label == "💬 Чат с ботом":
+        await cmd_chat(message, state)
+    elif label == "🤖 Мои боты":
+        await cmd_mybots(message)
+    elif label == "📊 Статистика":
+        await cmd_usage(message)
+    elif label == "📚 Обучение":
+        await cmd_teach(message, state)
+    elif label == "⚙️ Настройки":
+        await cmd_settings(message)
+    elif label == "💎 Тариф":
+        await cmd_subscribe(message)
+    elif label == "➕ Создать бота":
+        await cmd_start(message, state)
+    elif label == "❓ Помощь":
+        await cmd_help(message)
+
+
 def _consent_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -177,9 +253,12 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
 
     logger.info("intake: consent saved for tg_id={}", user.id)
     await state.set_state(IntakeStates.ask_type)
+    # Install the persistent main menu now that the user has consented.
+    # Inline keyboard for bot-type selection coexists with it (different layer).
+    is_admin_user = is_admin(user.id)
     await message.answer(
-        "Выберите тип бота:",
-        reply_markup=ReplyKeyboardRemove(),
+        "Согласие сохранено. Меню всегда доступно внизу экрана.",
+        reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
     )
     await message.answer(
         "Что именно вам нужно?",
@@ -970,6 +1049,48 @@ def _subscribe_keyboard() -> InlineKeyboardMarkup:
 async def cmd_subscribe(message: Message) -> None:
     await message.answer(
         "Выберите тариф подписки:", reply_markup=_subscribe_keyboard()
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    """Show the command index. Doubles as the entry-point for
+    re-installing the persistent main menu if the user managed to
+    dismiss it. Adds a hint when the client has no bots yet."""
+    user = message.from_user
+    if user is None:
+        return
+    is_admin_user = is_admin(user.id)
+
+    lines = [
+        "📋 ArmyBots — фабрика Telegram-ботов",
+        "",
+        "🤖 /mybots — список ваших ботов",
+        "💬 /chat — пообщаться с ИИ",
+        "📚 /teach — загрузить знания для бота",
+        "📊 /usage — статистика токенов",
+        "⚙️ /settings — настройки бота",
+        "💎 /subscribe — выбор тарифа",
+        "➕ /start — создать нового бота",
+    ]
+
+    client = await get_or_create_client(user.id, user.username)
+    bots = await get_client_bots(client.id)
+    if not bots:
+        lines.extend(
+            [
+                "",
+                "У вас пока нет ботов. Нажмите ➕ Создать бота чтобы начать.",
+            ]
+        )
+    else:
+        lines.extend(
+            ["", "Используйте кнопки внизу или вводите команды."]
+        )
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
     )
 
 
