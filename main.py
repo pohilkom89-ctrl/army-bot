@@ -66,6 +66,7 @@ from pipeline import (
     run_bot_query,
     run_pipeline,
 )
+from monitoring.alerts import attach_health_monitor
 from services.alerts import start_alerts_scheduler
 from services.image_generation import image_generator
 from services.rag import (
@@ -2619,6 +2620,7 @@ async def main():
     logger.info("Бот запущен")
 
     scheduler = start_alerts_scheduler(bot)
+    attach_health_monitor(scheduler, bot)
 
     polling_task = asyncio.create_task(
         dp.start_polling(bot), name="polling"

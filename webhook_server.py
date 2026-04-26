@@ -8,6 +8,7 @@ from loguru import logger
 
 from billing import handle_webhook, verify_payment_status
 from db.repository import get_bot_by_id_any, log_tokens
+from monitoring.health import register_health_routes
 
 # YooKassa delivers webhooks from this fixed set of networks. List
 # verified against https://yookassa.ru/developers/using-api/webhooks
@@ -152,6 +153,7 @@ def build_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/webhook/yukassa", yukassa_webhook)
     app.router.add_post("/internal/log_tokens", log_tokens_endpoint)
+    register_health_routes(app)
     return app
 
 
