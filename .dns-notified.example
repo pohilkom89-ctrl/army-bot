@@ -1,0 +1,37 @@
+# Marker file for .github/workflows/dns-watch.yml
+
+When DNS for armybots.ru first resolves to 45.12.73.106 on both
+Google (8.8.8.8) and Cloudflare (1.1.1.1) public resolvers, the
+workflow:
+
+  1. Sends a Telegram message to ADMIN_CHAT_ID via BOT_TOKEN_NOTIFICATIONS.
+  2. Creates the file `.dns-notified` (no extension) in the repo root.
+  3. Commits and pushes that file to main.
+
+On every subsequent run the very first step checks whether `.dns-notified`
+exists; if yes — the workflow exits silently without resolving DNS or
+sending anything. This is the idempotency mechanism that prevents
+duplicate notifications.
+
+## How to re-test the notification flow
+
+If you ever need to fire a new "DNS propagated" Telegram message
+(for example, after migrating to a different IP or for a manual smoke
+test):
+
+  1. Delete the marker on main:
+       git rm .dns-notified && git commit -m "dns: reset marker" && git push
+  2. Trigger the workflow manually:
+       gh workflow run dns-watch.yml --repo pohilkom89-ctrl/army-bot
+  3. Watch:
+       gh run watch --repo pohilkom89-ctrl/army-bot
+
+If both resolvers currently return 45.12.73.106 the message will fire
+again and a fresh `.dns-notified` will be committed.
+
+## Why this file exists
+
+This `.dns-notified.example` is a permanent doc fixture; the actual
+runtime marker is `.dns-notified` (no `.example` suffix) and is created
+automatically by the workflow on first success. Don't edit `.dns-notified`
+by hand — only delete it via `git rm` if you want to re-arm the workflow.
