@@ -37,7 +37,9 @@ from deployer import (
 )
 from db.repository import (
     anonymize_user,
+    count_client_bots,
     delete_bot,
+    get_active_subscription,
     get_bot_by_id,
     get_bot_stats,
     get_chat_history,
@@ -252,10 +254,26 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
         return
 
     logger.info("intake: consent saved for tg_id={}", user.id)
+    is_admin_user = is_admin(user.id)
+
+    # Bots-limit guard: block before the user invests time in the
+    # questionnaire. Slot may free up later via /mybots delete — they
+    # can re-enter intake then.
+    client = await get_or_create_client(user.id, user.username)
+    allowed, plan_name, count, limit = await _check_bots_limit(client.id, user.id)
+    if not allowed:
+        await state.clear()
+        await message.answer(
+            f"⚠️ У вас уже {count} ботов из {limit} на тарифе {plan_name}.\n"
+            "Создание нового невозможно — удалите существующего "
+            "через 🤖 Мои боты или апгрейд тарифа через 💎 Тариф.",
+            reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
+        )
+        return
+
     await state.set_state(IntakeStates.ask_type)
     # Install the persistent main menu now that the user has consented.
     # Inline keyboard for bot-type selection coexists with it (different layer).
-    is_admin_user = is_admin(user.id)
     await message.answer(
         "Согласие сохранено. Меню всегда доступно внизу экрана.",
         reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
@@ -464,6 +482,33 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         spec = await asyncio.to_thread(run_pipeline, pipeline_input)
 
         client = await get_or_create_client(user.id, user.username)
+
+        # Second bots-limit gate: between consent and token submission a
+        # parallel session could have created bots, or the client could
+        # have used multiple devices to start two intakes at once. Pipeline
+        # has already run (tokens spent) — log warning if we have to bail.
+        allowed, plan_name, count, limit = await _check_bots_limit(client.id, user.id)
+        if not allowed:
+            logger.warning(
+                "intake: bots_limit hit AFTER pipeline for client_id={} "
+                "(tokens already spent, count={}/{} on {})",
+                client.id,
+                count,
+                limit,
+                plan_name,
+            )
+            await message.answer(
+                f"🚫 Достигнут лимит ботов на вашем тарифе.\n\n"
+                f"Текущий тариф: {plan_name} ({limit})\n"
+                f"Активных ботов: {count}\n\n"
+                "Варианты:\n"
+                "• Удалите ненужного бота через 🤖 Мои боты\n"
+                "• Перейдите на тариф выше → 💎 Тариф",
+                reply_markup=_main_menu_keyboard(is_admin_user=is_admin(user.id)),
+            )
+            await state.clear()
+            return
+
         resolved_type = spec.requirements.get("bot_type", bot_type or "other")
         saved_bot = await save_bot_config(
             client_id=client.id,
@@ -1683,6 +1728,28 @@ async def cb_bot_edit_style(callback: CallbackQuery) -> None:
             reply_markup=_edit_style_keyboard(bot_id),
         )
     await callback.answer()
+
+
+async def _check_bots_limit(
+    client_id: int, telegram_id: int
+) -> tuple[bool, str, int, int]:
+    """Returns (allowed, plan_name, current_count, bots_limit). Admins
+    bypass the check entirely (returns True with placeholder values).
+    Clients without an active subscription fall back to starter limits.
+
+    Used by both the post-consent guard in on_consent_yes (block before
+    intake starts) and the post-token guard in on_bot_token (block right
+    before save_bot_config). Two checks because the wait between consent
+    and token submission can be minutes — a slot freed by parallel
+    delete shouldn't be the difference between blocking and allowing."""
+    if is_admin(telegram_id):
+        return True, "Безлимит (админ)", 0, 0
+    sub = await get_active_subscription(client_id)
+    tier = sub.tier if sub else "starter"
+    plan = PLANS[tier]
+    limit = plan["bots_limit"]
+    count = await count_client_bots(client_id)
+    return count < limit, plan["name"], count, limit
 
 
 async def _redeploy_after_edit(bot_id: int, message: Message) -> None:

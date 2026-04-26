@@ -343,6 +343,22 @@ async def create_subscription(
         return sub
 
 
+async def count_client_bots(client_id: int) -> int:
+    """Count all BotConfig rows for this client. Used by on_bot_token
+    and the post-consent guard to enforce PLANS[tier]['bots_limit'].
+    `remove_bot` does a hard-delete (drops the row), so paused bots
+    are the only non-active rows left and they correctly count against
+    the limit (a paused bot still owns its container/image and can be
+    resumed without going through intake again)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(func.count())
+            .select_from(BotConfig)
+            .where(BotConfig.client_id == client_id)
+        )
+        return int(result.scalar_one() or 0)
+
+
 async def find_subscription_by_payment_id(
     payment_id: str,
 ) -> Optional[Subscription]:
