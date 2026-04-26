@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="description" content="ArmyBots — фабрика Telegram-ботов с ИИ. Парсеры конкурентов, боты-продавцы, контент-боты, поддержка 24/7. Серверы в России, 152-ФЗ.">
+<title>ArmyBots — фабрика Telegram-ботов с ИИ</title>
+<style>
+:root {
+  --bg: #0a0a0a;
+  --bg-card: #141414;
+  --fg: #f5f5f5;
+  --fg-dim: #999;
+  --accent: #4f7cff;
+  --accent-hover: #6b91ff;
+  --border: #222;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Helvetica Neue", Roboto, sans-serif;
+  font-size: 17px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+}
+
+main {
+  max-width: 560px;
+  width: 100%;
+  text-align: center;
+}
+
+h1 {
+  font-size: 38px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin-bottom: 14px;
+}
+
+.tagline {
+  color: var(--fg-dim);
+  font-size: 18px;
+  margin-bottom: 44px;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 44px;
+  text-align: left;
+}
+
+.feature {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 18px;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.feature-emoji {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+.cta {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 17px;
+  padding: 16px 32px;
+  border-radius: 12px;
+  transition: background-color 0.15s ease;
+}
+
+.cta:hover, .cta:focus {
+  background: var(--accent-hover);
+}
+
+.coming-soon {
+  margin-top: 36px;
+  color: var(--fg-dim);
+  font-size: 14px;
+}
+
+footer {
+  margin-top: 64px;
+  color: var(--fg-dim);
+  font-size: 13px;
+  text-align: center;
+}
+
+@media (max-width: 480px) {
+  h1 { font-size: 30px; }
+  .tagline { font-size: 16px; }
+  .features { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<main>
+  <h1>ArmyBots</h1>
+  <p class="tagline">Фабрика Telegram-ботов с ИИ</p>
+
+  <div class="features">
+    <div class="feature"><span class="feature-emoji">🤖</span><span>Парсеры конкурентов</span></div>
+    <div class="feature"><span class="feature-emoji">💼</span><span>Боты-продавцы</span></div>
+    <div class="feature"><span class="feature-emoji">✍️</span><span>Контент-боты</span></div>
+    <div class="feature"><span class="feature-emoji">🎧</span><span>Поддержка 24/7</span></div>
+  </div>
+
+  <a class="cta" href="https://t.me/ArmyBotsBot">Начать в Telegram →</a>
+
+  <p class="coming-soon">Скоро здесь будет полный сайт.</p>
+</main>
+
+<footer>
+  © 2026 ArmyBots · Серверы в России · 152-ФЗ
+</footer>
+
+</body>
+</html>

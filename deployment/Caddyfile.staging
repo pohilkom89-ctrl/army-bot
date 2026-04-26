@@ -1,0 +1,39 @@
+# Staging variant of the production Caddyfile — uses Let's Encrypt's
+# staging-CA so we can verify ACME-challenge works without burning the
+# 5-failures-per-hour rate limit on the production CA. Browsers will
+# show a "not trusted" cert (signed by Fake LE Intermediate X1), that's
+# expected — this exists ONLY to confirm the challenge flow before the
+# first real deploy.
+#
+# After a successful staging run, swap to deployment/Caddyfile and
+# `systemctl restart caddy` — Caddy stores its account separately per
+# CA, so the production cert request starts fresh.
+
+{
+	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+armybots.ru, www.armybots.ru {
+	encode gzip zstd
+
+	handle /webhook/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle /internal/* {
+		respond "not found" 404
+	}
+
+	handle {
+		root * /var/www/armybots
+		file_server
+	}
+
+	log {
+		output file /var/log/caddy/armybots-staging.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+		format json
+	}
+}

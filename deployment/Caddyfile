@@ -1,0 +1,42 @@
+# ArmyBots — production Caddyfile.
+#
+# Layout:
+#   armybots.ru / www.armybots.ru:443  →  Caddy (this file)
+#     /webhook/*    →  reverse_proxy 127.0.0.1:8080  (YooKassa webhooks)
+#     /internal/*   →  blocked (404) — usage_reporter from client containers
+#                      reaches the factory via host.docker.internal:8080
+#                      directly through the docker bridge, NOT through
+#                      public HTTPS. Anything hitting /internal from the
+#                      internet is suspicious; INTERNAL_API_KEY is too
+#                      sensitive to expose even behind compare_digest auth.
+#     everything else →  static landing at /var/www/armybots
+#
+# Caddy auto-fetches Let's Encrypt certs (HTTP-01 ACME on port 80) and
+# auto-renews. Plain HTTP requests are 308-redirected to HTTPS by default.
+#
+# Deploy: see deployment/install_caddy.sh
+
+armybots.ru, www.armybots.ru {
+	encode gzip zstd
+
+	handle /webhook/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle /internal/* {
+		respond "not found" 404
+	}
+
+	handle {
+		root * /var/www/armybots
+		file_server
+	}
+
+	log {
+		output file /var/log/caddy/armybots.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+		format json
+	}
+}
