@@ -61,7 +61,14 @@ if [ ! -f "$CADDYFILE_SRC" ]; then
     exit 1
 fi
 install -m 0644 -o root -g root "$CADDYFILE_SRC" /etc/caddy/Caddyfile
+# Pre-create log dir so `caddy validate` (running as root) doesn't materialize
+# log files owned by root:root mode 0600 — that breaks the daemon (caddy user)
+# from opening them on subsequent restart.
+mkdir -p /var/log/caddy
+chown caddy:caddy /var/log/caddy
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+# Re-chown after validate in case it created any log files as root.
+chown -R caddy:caddy /var/log/caddy
 
 echo "=== 4. Install landing page ==="
 mkdir -p /var/www/armybots
@@ -96,5 +103,10 @@ echo
 echo "=== Done. Remember: ==="
 echo "  - Wait ~60s for Let's Encrypt cert acquisition on first run"
 echo "  - Check cert: journalctl -u caddy -n 100 | grep -i certificate"
-echo "  - When HTTPS confirmed working: ufw delete allow 8080/tcp"
+echo "  - When HTTPS confirmed working, lock down 8080:"
+echo "      ufw allow from 172.17.0.0/16 to any port 8080 proto tcp comment 'docker bridge → factory'"
+echo "      ufw delete allow 8080/tcp"
+echo "    (the docker-bridge ALLOW must come FIRST — without it, client containers"
+echo "     calling host.docker.internal:8080 hit the host's INPUT chain, which UFW"
+echo "     drops by default-deny once the public allow is removed.)"
 echo "  - Update YooKassa webhook URL to https://armybots.ru/webhook/yukassa"
