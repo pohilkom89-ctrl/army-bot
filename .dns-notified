@@ -1,0 +1,3 @@
+DNS armybots.ru propagated and verified (manual) — 2026-04-26.
+HTTPS up via Caddy + Let's Encrypt prod cert (E7).
+See .dns-notified.example for re-arm procedure.
