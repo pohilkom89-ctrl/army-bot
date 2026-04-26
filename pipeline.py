@@ -132,6 +132,11 @@ from agents.builder import builder_agent  # noqa: E402
 from agents.prompt_engineer import prompt_engineer_agent  # noqa: E402
 
 
+# TODO(integrations): consume QUESTIONNAIRES[qtype]["required_integrations"]
+#   - select architecture template variant (e.g. add calendar/payments scaffold
+#     when integrations include calendar_logic / payment_optional)
+#   - warn the client during intake if any required integration needs an
+#     external API key they must provide (e.g. vk_api, google_sheets)
 def _format_raw_input(safe_answers: dict[str, Any]) -> str:
     """Build a human-readable block for the analyst LLM prompt.
 

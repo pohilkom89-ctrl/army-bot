@@ -77,6 +77,15 @@ h1 {
   gap: 12px;
 }
 
+/* When the total card count is odd, center the orphan in its own row
+   instead of leaving it pinned to the left of an empty cell. */
+.feature:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+  justify-self: center;
+  max-width: calc(50% - 6px);
+  width: 100%;
+}
+
 .feature-emoji {
   font-size: 22px;
   flex-shrink: 0;
@@ -115,6 +124,11 @@ footer {
   h1 { font-size: 30px; }
   .tagline { font-size: 16px; }
   .features { grid-template-columns: 1fr; }
+  .feature:last-child:nth-child(odd) {
+    grid-column: auto;
+    justify-self: stretch;
+    max-width: none;
+  }
 }
 </style>
 </head>
@@ -129,6 +143,7 @@ footer {
     <div class="feature"><span class="feature-emoji">💼</span><span>Боты-продавцы</span></div>
     <div class="feature"><span class="feature-emoji">✍️</span><span>Контент-боты</span></div>
     <div class="feature"><span class="feature-emoji">🎧</span><span>Поддержка 24/7</span></div>
+    <div class="feature"><span class="feature-emoji">📅</span><span>Заказы услуг</span></div>
   </div>
 
   <a class="cta" href="https://t.me/ArmyBotsBot">Начать в Telegram →</a>
