@@ -52,13 +52,15 @@ else
     exit 1
 fi
 
-# Retention: drop dumps older than RETENTION_DAYS.
-find "$BACKUP_DIR" -maxdepth 1 -name "*.sql.gz" -mtime +"$RETENTION_DAYS" \
-    -print -delete 2>/dev/null \
-    | while read -r f; do
+# Retention: drop dumps older than RETENTION_DAYS. Wrapped in || true
+# so a stale pipe (no files to delete + set -o pipefail interaction)
+# doesn't fail the script after a successful dump.
+PRUNED=$(find "$BACKUP_DIR" -maxdepth 1 -name "*.sql.gz" -mtime +"$RETENTION_DAYS" -print -delete 2>/dev/null || true)
+if [ -n "$PRUNED" ]; then
+    while read -r f; do
+        [ -z "$f" ] && continue
         echo "[$TS] PRUNED $f" >> "$LOG"
-      done
+    done <<< "$PRUNED"
+fi
 
-# Always exit 0 if the dump succeeded — pruning failures shouldn't
-# fail the cron job.
 exit 0
