@@ -103,7 +103,7 @@ def test_analyst_agent_raises_after_two_failures(mock_run_agent):
     assert mock_run_agent.call_count == 2
 
 
-# ──── analyst bot_type Literal — all 6 types must validate ─────────
+# ──── analyst bot_type Literal — all 7 types must validate ─────────
 
 
 def test_analyst_classifies_service_orders(mock_run_agent):
@@ -131,7 +131,22 @@ def test_analyst_classifies_coach(mock_run_agent):
     assert result["bot_type"] == "coach"
 
 
-def test_analyst_prompt_enumerates_all_six_types():
+def test_analyst_classifies_creative(mock_run_agent):
+    """creative must be a valid bot_type. Distinct from `content`: creative
+    produces ideas/concepts/options (brainstorm via Six Hats / SCAMPER /
+    naming / pitches), `content` produces finished publishable artifacts."""
+    from agents.analyst import analyst_agent
+
+    payload = {**_VALID_REQUIREMENTS, "bot_type": "creative"}
+    mock_run_agent.return_value = json.dumps(payload)
+    result = analyst_agent(
+        "Маркетолог, генерация идей для рекламы, методики Six Hats и SCAMPER, нейминг"
+    )
+
+    assert result["bot_type"] == "creative"
+
+
+def test_analyst_prompt_enumerates_all_seven_types():
     """Schema and the system prompt must agree on which bot_types exist —
     if they drift the LLM either invents a value the validator rejects
     (retry burns tokens) or silently misclassifies into a base type.
@@ -139,7 +154,15 @@ def test_analyst_prompt_enumerates_all_six_types():
     from agents.analyst import ANALYST_SYSTEM_PROMPT, RequirementsSchema
 
     schema_types = set(RequirementsSchema.model_fields["bot_type"].annotation.__args__)
-    expected = {"parser", "seller", "content", "support", "service_orders", "coach"}
+    expected = {
+        "parser",
+        "seller",
+        "content",
+        "support",
+        "service_orders",
+        "coach",
+        "creative",
+    }
     assert schema_types == expected, f"Schema drift: {schema_types ^ expected}"
 
     for bot_type in expected:

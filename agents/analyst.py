@@ -18,7 +18,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 Схема ответа:
 {
-  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach",
+  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative",
   "purpose": "краткое описание цели бота (1-2 предложения)",
   "target_audience": "кто будет использовать бота",
   "key_features": ["фича1", "фича2", ...],
@@ -35,11 +35,14 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - "support"        — отвечает на готовые вопросы из FAQ/базы знаний (статичные ответы)
 - "service_orders" — записывает клиентов на УСЛУГИ к конкретному мастеру/времени (барбершоп, СПА, мастер маникюра, автосервис). Корзина услуг + расписание + персонал + опциональная предоплата
 - "coach"          — ведёт клиента ПО ДОЛГОСРОЧНОЙ ПРОГРАММЕ (фитнес-тренер, лайф-коуч, бизнес-наставник, нутрициолог). Прогресс по этапам, ежедневные задания, мотивация, отслеживание показателей
+- "creative"       — помогает ПРИДУМЫВАТЬ ИДЕИ через методики мышления (Six Hats, SCAMPER, Mind Map, Design Thinking). Брейншторм, нейминг, концепции рекламы, питчи, контент-стратегия. Для маркетологов/копирайтеров/продактов/агентств. Часто с памятью контекста между сессиями
 
 Различия похожих типов (ВАЖНО — не путать):
 - seller vs service_orders — продаёт ТОВАР (его привезут/отдадут) → seller; продаёт УСЛУГУ С ЗАПИСЬЮ на конкретный слот к конкретному мастеру → service_orders. Если есть «график мастеров» / «свободные часы» / «бронирование» — это service_orders, даже если бизнес называет это «продажа».
 - support vs coach — отвечает разово на вопросы из FAQ → support; ведёт клиента по плану несколько недель/месяцев с трекингом прогресса → coach
 - content vs coach — генерирует ТЕКСТЫ для публикации → content; персональная программа с заданиями для клиента → coach
+- content vs creative — генерирует ГОТОВЫЙ публикационный артефакт (пост, статью, рассылку с конкретным текстом) → content; помогает ПРИДУМАТЬ ИДЕИ/КОНЦЕПЦИИ/НАПРАВЛЕНИЯ (списки вариантов, нейминг, питчи, методики мышления) → creative. Если запрос «напиши пост на тему X» → content; если «придумай 20 идей постов» или «помоги с концепцией кампании» → creative
+- creative vs coach — креатив помогает с КРЕАТИВНЫМИ ЗАДАЧАМИ (одноразовые сессии брейншторма) → creative; ведёт клиента ПО ПРОГРАММЕ с прогрессом → coach
 
 Правила по complexity:
 - "simple"  — до 3 фич, без внешних интеграций
@@ -157,6 +160,25 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "approach_notes": "уникальность методики, ограничения"
   }
 
+- Для creative:
+  {
+    "client_role": "marketer | copywriter | product | agency | ...",   // роль владельца бота
+    "task_types": ["ideas", "ads", "content_strategy", "naming", "headlines", "pitches", ...],
+    "methodologies": ["six_hats", "scamper", "mind_map", "design_thinking", "any"],
+    "output_format": "list | categories | story | with_examples",
+    "tone": "expert | provocateur | facilitator | analyst",
+    "detail_level": "headlines_only | brief | detailed",
+    "industries": ["it", "food", "fashion", "b2b", ...] | "universal",
+    "asks_clarifying_questions": "always | when_incomplete | never",
+    "criticizes_ideas": "yes_with_reasoning | no_just_lists | on_request",
+    "memory_mode": "persistent | session_only | none",   // нужна ли долговременная память клиента
+    "forbidden_topics": ["..."],
+    "criticism_response": "defend | adapt | inquire",   // как бот реагирует на критику его идей
+    "extra_formats": ["mind_map", "table", "pitch_structure"] | [],
+    "response_length": "short | medium | long",
+    "approach_notes": "уникальные методики, кейсы, ограничения"
+  }
+
 КРИТИЧЕСКИ ВАЖНО по секретам:
 - Если в ответе клиента встречаются API-токены, пароли, ключи, контакты менеджера (@username, номер телефона) — НЕ копируй их значения в extras. Вместо значения ставь плейсхолдер-флаг (*_placeholder: true или has_*_token: true).
 - target_audience/purpose/key_features тоже НЕ должны содержать секретов.
@@ -167,7 +189,13 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 class RequirementsSchema(BaseModel):
     bot_type: Literal[
-        "parser", "seller", "content", "support", "service_orders", "coach"
+        "parser",
+        "seller",
+        "content",
+        "support",
+        "service_orders",
+        "coach",
+        "creative",
     ]
     purpose: str = Field(min_length=1)
     target_audience: str = Field(min_length=1)

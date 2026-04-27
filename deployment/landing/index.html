@@ -39,7 +39,7 @@ body {
 }
 
 main {
-  max-width: 560px;
+  max-width: 760px;
   width: 100%;
   text-align: center;
 }
@@ -60,7 +60,7 @@ h1 {
 
 .features {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
   margin-bottom: 44px;
   text-align: left;
@@ -77,12 +77,14 @@ h1 {
   gap: 12px;
 }
 
-/* When the total card count is odd, center the orphan in its own row
-   instead of leaving it pinned to the left of an empty cell. */
-.feature:last-child:nth-child(odd) {
+/* When count mod 3 == 1 (1, 4, 7, 10, ...) the last row holds a single
+   orphan card; center it instead of pinning to the left. For count mod
+   3 == 2 the two cards in the last row stay left-aligned (revisit when
+   that case lands). */
+.feature:last-child:nth-child(3n+1) {
   grid-column: 1 / -1;
   justify-self: center;
-  max-width: calc(50% - 6px);
+  max-width: calc((100% - 24px) / 3);
   width: 100%;
 }
 
@@ -124,7 +126,7 @@ footer {
   h1 { font-size: 30px; }
   .tagline { font-size: 16px; }
   .features { grid-template-columns: 1fr; }
-  .feature:last-child:nth-child(odd) {
+  .feature:last-child:nth-child(3n+1) {
     grid-column: auto;
     justify-self: stretch;
     max-width: none;
@@ -145,6 +147,7 @@ footer {
     <div class="feature"><span class="feature-emoji">🎧</span><span>Поддержка 24/7</span></div>
     <div class="feature"><span class="feature-emoji">📅</span><span>Заказы услуг</span></div>
     <div class="feature"><span class="feature-emoji">💪</span><span>Тренеры и коучи</span></div>
+    <div class="feature"><span class="feature-emoji">🎨</span><span>Креативные ассистенты</span></div>
   </div>
 
   <a class="cta" href="https://t.me/ArmyBotsBot">Начать в Telegram →</a>
