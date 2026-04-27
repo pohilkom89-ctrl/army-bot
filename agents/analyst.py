@@ -18,7 +18,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 Схема ответа:
 {
-  "bot_type": "parser" | "seller" | "content" | "support",
+  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach",
   "purpose": "краткое описание цели бота (1-2 предложения)",
   "target_audience": "кто будет использовать бота",
   "key_features": ["фича1", "фича2", ...],
@@ -29,10 +29,17 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 }
 
 Правила классификации bot_type:
-- "parser"  — собирает/парсит данные из внешних источников (VK, TG, Instagram)
-- "seller"  — продаёт товары/услуги, принимает заказы
-- "content" — генерирует тексты, посты, статьи
-- "support" — отвечает на вопросы клиентов, работает с базой знаний/FAQ
+- "parser"         — собирает/парсит данные из внешних источников (VK, TG, Instagram)
+- "seller"         — продаёт ТОВАРЫ (физические или цифровые), принимает заказы на товар
+- "content"        — генерирует тексты, посты, статьи
+- "support"        — отвечает на готовые вопросы из FAQ/базы знаний (статичные ответы)
+- "service_orders" — записывает клиентов на УСЛУГИ к конкретному мастеру/времени (барбершоп, СПА, мастер маникюра, автосервис). Корзина услуг + расписание + персонал + опциональная предоплата
+- "coach"          — ведёт клиента ПО ДОЛГОСРОЧНОЙ ПРОГРАММЕ (фитнес-тренер, лайф-коуч, бизнес-наставник, нутрициолог). Прогресс по этапам, ежедневные задания, мотивация, отслеживание показателей
+
+Различия похожих типов (ВАЖНО — не путать):
+- seller vs service_orders — продаёт ТОВАР (его привезут/отдадут) → seller; продаёт УСЛУГУ С ЗАПИСЬЮ на конкретный слот к конкретному мастеру → service_orders. Если есть «график мастеров» / «свободные часы» / «бронирование» — это service_orders, даже если бизнес называет это «продажа».
+- support vs coach — отвечает разово на вопросы из FAQ → support; ведёт клиента по плану несколько недель/месяцев с трекингом прогресса → coach
+- content vs coach — генерирует ТЕКСТЫ для публикации → content; персональная программа с заданиями для клиента → coach
 
 Правила по complexity:
 - "simple"  — до 3 фич, без внешних интеграций
@@ -111,6 +118,45 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "peak_hours": "..."
   }
 
+- Для service_orders:
+  {
+    "company": "название и сфера",
+    "location": "адрес или несколько точек",
+    "services": [{"name": "...", "price": "...", "duration": "..."}],  // услуга-цена-длительность
+    "schedule": "график работы",
+    "staff": ["имя1", "имя2", ...] | "число сотрудников",  // имена если бронь к конкретному мастеру
+    "prepayment": "none | partial | full",
+    "payment_methods": ["...", ...],
+    "manager_telegram_placeholder": true | false,    // true если клиент дал контакт (значение НЕ пиши!)
+    "booking_close_hours_before": число | null,      // за сколько часов закрывается запись
+    "cancellation_policy": "...",
+    "promotions": "...",
+    "tone": "official | friendly | informal",
+    "forbidden_topics": ["..."],
+    "reminders": "24h | 2h | both | none",
+    "extras_notes": "особенности бизнеса"
+  }
+
+- Для coach:
+  {
+    "niche": "fitness | life_coach | business | nutrition | ...",
+    "audience": "ЦА с возрастом, полом, болями",
+    "programs": [{"name": "...", "duration": "...", "price": "..."}],  // программа-длительность-цена
+    "format": "online | offline | group | individual | mixed",
+    "progress_tracking": ["measurements", "photos", "metrics", "checklists", "daily_report"],
+    "daily_assignments": "morning | evening | client_schedule | none",
+    "motivation_style": "tough | supportive | expert",
+    "materials": ["pdf", "video", "audio", "checklists", ...],
+    "feedback_frequency": "daily | weekly | end_of_program | none",
+    "relapse_strategy": "support_continue | remind_consequences | refer_to_coach",
+    "payment_terms": "full_prepay | installments | per_stage",
+    "warranty_return": "...",
+    "personal_consult_telegram_placeholder": true | false,  // true если клиент дал @ тренера
+    "contraindications": ["..."],                    // кому не подходит, противопоказания
+    "forbidden_topics": ["..."],
+    "approach_notes": "уникальность методики, ограничения"
+  }
+
 КРИТИЧЕСКИ ВАЖНО по секретам:
 - Если в ответе клиента встречаются API-токены, пароли, ключи, контакты менеджера (@username, номер телефона) — НЕ копируй их значения в extras. Вместо значения ставь плейсхолдер-флаг (*_placeholder: true или has_*_token: true).
 - target_audience/purpose/key_features тоже НЕ должны содержать секретов.
@@ -120,7 +166,9 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 
 class RequirementsSchema(BaseModel):
-    bot_type: Literal["parser", "seller", "content", "support"]
+    bot_type: Literal[
+        "parser", "seller", "content", "support", "service_orders", "coach"
+    ]
     purpose: str = Field(min_length=1)
     target_audience: str = Field(min_length=1)
     key_features: list[str] = Field(min_length=1)
