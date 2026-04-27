@@ -1,0 +1,35 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 45.12.73.106
+          username: deploy
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /home/deploy/army-bot
+            git pull
+            sudo systemctl restart armybots
+            sleep 3
+            sudo journalctl -u armybots -n 10 --no-pager
+
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS https://armybots.ru/health/full
