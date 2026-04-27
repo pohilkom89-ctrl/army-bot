@@ -103,6 +103,52 @@ def test_analyst_agent_raises_after_two_failures(mock_run_agent):
     assert mock_run_agent.call_count == 2
 
 
+# ──── analyst bot_type Literal — all 6 types must validate ─────────
+
+
+def test_analyst_classifies_service_orders(mock_run_agent):
+    """service_orders must be a valid bot_type. Before this fix the Literal
+    only had 4 base types, so a service_orders intake was force-misclassified
+    by the LLM as 'seller' — losing fields the seller-extras schema doesn't
+    have (staff, booking_close_hours_before, cancellation_policy, reminders)."""
+    from agents.analyst import analyst_agent
+
+    payload = {**_VALID_REQUIREMENTS, "bot_type": "service_orders"}
+    mock_run_agent.return_value = json.dumps(payload)
+    result = analyst_agent("Барбершоп Lions, мастера, расписание, бронь")
+
+    assert result["bot_type"] == "service_orders"
+
+
+def test_analyst_classifies_coach(mock_run_agent):
+    """coach must be a valid bot_type — same class of bug as service_orders."""
+    from agents.analyst import analyst_agent
+
+    payload = {**_VALID_REQUIREMENTS, "bot_type": "coach"}
+    mock_run_agent.return_value = json.dumps(payload)
+    result = analyst_agent("Фитнес-тренер, программа Похудение за 30 дней, прогресс по замерам")
+
+    assert result["bot_type"] == "coach"
+
+
+def test_analyst_prompt_enumerates_all_six_types():
+    """Schema and the system prompt must agree on which bot_types exist —
+    if they drift the LLM either invents a value the validator rejects
+    (retry burns tokens) or silently misclassifies into a base type.
+    Guards against forgetting to update one side."""
+    from agents.analyst import ANALYST_SYSTEM_PROMPT, RequirementsSchema
+
+    schema_types = set(RequirementsSchema.model_fields["bot_type"].annotation.__args__)
+    expected = {"parser", "seller", "content", "support", "service_orders", "coach"}
+    assert schema_types == expected, f"Schema drift: {schema_types ^ expected}"
+
+    for bot_type in expected:
+        assert (
+            f'"{bot_type}"' in ANALYST_SYSTEM_PROMPT
+            or f'- "{bot_type}"' in ANALYST_SYSTEM_PROMPT
+        ), f"bot_type {bot_type!r} missing from system prompt"
+
+
 # ──── architect.architect_agent ──────────────────────────────────────
 
 
