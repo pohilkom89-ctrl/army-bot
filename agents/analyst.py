@@ -18,7 +18,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 Схема ответа:
 {
-  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative",
+  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative" | "planner",
   "purpose": "краткое описание цели бота (1-2 предложения)",
   "target_audience": "кто будет использовать бота",
   "key_features": ["фича1", "фича2", ...],
@@ -36,6 +36,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - "service_orders" — записывает клиентов на УСЛУГИ к конкретному мастеру/времени (барбершоп, СПА, мастер маникюра, автосервис). Корзина услуг + расписание + персонал + опциональная предоплата
 - "coach"          — ведёт клиента ПО ДОЛГОСРОЧНОЙ ПРОГРАММЕ (фитнес-тренер, лайф-коуч, бизнес-наставник, нутрициолог). Прогресс по этапам, ежедневные задания, мотивация, отслеживание показателей
 - "creative"       — помогает ПРИДУМЫВАТЬ ИДЕИ через методики мышления (Six Hats, SCAMPER, Mind Map, Design Thinking). Брейншторм, нейминг, концепции рекламы, питчи, контент-стратегия. Для маркетологов/копирайтеров/продактов/агентств. Часто с памятью контекста между сессиями
+- "planner"        — управляет ЗАДАЧАМИ И ВРЕМЕНЕМ пользователя (списки дел, привычки, цели, напоминания, аналитика выполнения, GTD/Bullet Journal/Pomodoro). Универсальный продуктивности-бот, не привязан к конкретной программе обучения. Часто с расписанными напоминаниями и streak-счётчиками
 
 Различия похожих типов (ВАЖНО — не путать):
 - seller vs service_orders — продаёт ТОВАР (его привезут/отдадут) → seller; продаёт УСЛУГУ С ЗАПИСЬЮ на конкретный слот к конкретному мастеру → service_orders. Если есть «график мастеров» / «свободные часы» / «бронирование» — это service_orders, даже если бизнес называет это «продажа».
@@ -43,6 +44,8 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - content vs coach — генерирует ТЕКСТЫ для публикации → content; персональная программа с заданиями для клиента → coach
 - content vs creative — генерирует ГОТОВЫЙ публикационный артефакт (пост, статью, рассылку с конкретным текстом) → content; помогает ПРИДУМАТЬ ИДЕИ/КОНЦЕПЦИИ/НАПРАВЛЕНИЯ (списки вариантов, нейминг, питчи, методики мышления) → creative. Если запрос «напиши пост на тему X» → content; если «придумай 20 идей постов» или «помоги с концепцией кампании» → creative
 - creative vs coach — креатив помогает с КРЕАТИВНЫМИ ЗАДАЧАМИ (одноразовые сессии брейншторма) → creative; ведёт клиента ПО ПРОГРАММЕ с прогрессом → coach
+- planner vs coach — coach ведёт по КОНКРЕТНОЙ ОБУЧАЮЩЕЙ/ТРЕНИРОВОЧНОЙ ПРОГРАММЕ с заранее заданным контентом и этапами (Похудение за 30 дней, Курс по Python) → coach; planner — ОБЩАЯ ЛИЧНАЯ ПРОДУКТИВНОСТЬ пользователя без жёстко заданной программы (списки дел, привычки, цели, GTD) → planner. Если бот «знает программу и ведёт по ней» → coach; если бот «помогает упорядочить ЛЮБЫЕ задачи пользователя» → planner
+- planner vs support — support отвечает на вопросы клиентов КОМПАНИИ из её FAQ → support; planner управляет ЛИЧНЫМИ задачами/привычками самого пользователя → planner
 
 Правила по complexity:
 - "simple"  — до 3 фич, без внешних интеграций
@@ -179,6 +182,25 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "approach_notes": "уникальные методики, кейсы, ограничения"
   }
 
+- Для planner:
+  {
+    "user_scope": "personal | team | service_clients | broad_audience",  // кто пользуется ботом
+    "task_categories": ["work", "personal", "study", ...] | "by_priority" | "custom",
+    "reminder_modes": ["before_deadline", "morning_summary", "evening_review", "on_demand"],
+    "input_format": "text | voice | template | natural_language",
+    "habits": "daily | weekly | streak_counter | none",
+    "long_term_goals": "monthly | quarterly | yearly | with_subtasks | none",
+    "analytics": "completion_count | percentage | streak | none",
+    "motivation_style": "supportive | tough | neutral | gamified",
+    "gamification": "points | levels | achievements | none",
+    "task_breakdown": "auto | on_request | none",          // помощь в декомпозиции больших задач
+    "overdue_strategy": "reschedule | persistent_remind | delete | ask",
+    "daily_rituals": "morning_plan | evening_review | both | none",
+    "constraints": ["no_night_reminders", "no_criticism", ...],
+    "methodology": "gtd | bullet_journal | pomodoro | custom | none",
+    "approach_notes": "особенности подхода"
+  }
+
 КРИТИЧЕСКИ ВАЖНО по секретам:
 - Если в ответе клиента встречаются API-токены, пароли, ключи, контакты менеджера (@username, номер телефона) — НЕ копируй их значения в extras. Вместо значения ставь плейсхолдер-флаг (*_placeholder: true или has_*_token: true).
 - target_audience/purpose/key_features тоже НЕ должны содержать секретов.
@@ -196,6 +218,7 @@ class RequirementsSchema(BaseModel):
         "service_orders",
         "coach",
         "creative",
+        "planner",
     ]
     purpose: str = Field(min_length=1)
     target_audience: str = Field(min_length=1)
