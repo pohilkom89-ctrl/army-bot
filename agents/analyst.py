@@ -18,7 +18,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 Схема ответа:
 {
-  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative" | "planner",
+  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative" | "planner" | "edu",
   "purpose": "краткое описание цели бота (1-2 предложения)",
   "target_audience": "кто будет использовать бота",
   "key_features": ["фича1", "фича2", ...],
@@ -37,6 +37,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - "coach"          — ведёт клиента ПО ДОЛГОСРОЧНОЙ ПРОГРАММЕ (фитнес-тренер, лайф-коуч, бизнес-наставник, нутрициолог). Прогресс по этапам, ежедневные задания, мотивация, отслеживание показателей
 - "creative"       — помогает ПРИДУМЫВАТЬ ИДЕИ через методики мышления (Six Hats, SCAMPER, Mind Map, Design Thinking). Брейншторм, нейминг, концепции рекламы, питчи, контент-стратегия. Для маркетологов/копирайтеров/продактов/агентств. Часто с памятью контекста между сессиями
 - "planner"        — управляет ЗАДАЧАМИ И ВРЕМЕНЕМ пользователя (списки дел, привычки, цели, напоминания, аналитика выполнения, GTD/Bullet Journal/Pomodoro). Универсальный продуктивности-бот, не привязан к конкретной программе обучения. Часто с расписанными напоминаниями и streak-счётчиками
+- "edu"            — ПРЕПОДАЁТ ПРЕДМЕТ через структурированный курс уроков с тестами, домашними заданиями и проверкой знаний (английский, математика, программирование, маркетинг, дизайн). Уроки → теория → примеры → практика → тест → ДЗ. Прогресс по уровням (A1-C2 / начинающий-продвинутый / по классам). Часто с сертификатами и геймификацией streak/баллы
 
 Различия похожих типов (ВАЖНО — не путать):
 - seller vs service_orders — продаёт ТОВАР (его привезут/отдадут) → seller; продаёт УСЛУГУ С ЗАПИСЬЮ на конкретный слот к конкретному мастеру → service_orders. Если есть «график мастеров» / «свободные часы» / «бронирование» — это service_orders, даже если бизнес называет это «продажа».
@@ -46,6 +47,9 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - creative vs coach — креатив помогает с КРЕАТИВНЫМИ ЗАДАЧАМИ (одноразовые сессии брейншторма) → creative; ведёт клиента ПО ПРОГРАММЕ с прогрессом → coach
 - planner vs coach — coach ведёт по КОНКРЕТНОЙ ОБУЧАЮЩЕЙ/ТРЕНИРОВОЧНОЙ ПРОГРАММЕ с заранее заданным контентом и этапами (Похудение за 30 дней, Курс по Python) → coach; planner — ОБЩАЯ ЛИЧНАЯ ПРОДУКТИВНОСТЬ пользователя без жёстко заданной программы (списки дел, привычки, цели, GTD) → planner. Если бот «знает программу и ведёт по ней» → coach; если бот «помогает упорядочить ЛЮБЫЕ задачи пользователя» → planner
 - planner vs support — support отвечает на вопросы клиентов КОМПАНИИ из её FAQ → support; planner управляет ЛИЧНЫМИ задачами/привычками самого пользователя → planner
+- edu vs coach — coach ведёт по НАВЫКОВОЙ ПРОГРАММЕ (фитнес, питание, лайф-цели) с прогрессом по показателям/замерам, ежедневной мотивацией и адаптацией под клиента; edu преподаёт ПРЕДМЕТ через стандартизированный курс (уроки, тесты, ДЗ, оценки), один и тот же контент для всех учеников. «Учить ДЕЛАТЬ» (тренировать привычку, доводить до результата) → coach; «Учить ЗНАТЬ» (передавать знания с проверкой усвоения) → edu. Если есть «уроки», «тесты», «ДЗ», «уровни A1-C2/по классам», «сертификаты по итогу» → edu, даже если бизнес называет это «курсом коучинга»
+- edu vs content — content генерирует ТЕКСТЫ для публикации; edu проводит УРОКИ с тестами и проверкой знаний. Если бот «генерирует контент к уроку» — это всё равно edu (учебный материал — часть курса), не content
+- edu vs support — support отвечает разово на вопросы из FAQ компании; edu ведёт ученика по СТРУКТУРИРОВАННОМУ курсу с уроками и проверкой знаний
 
 Правила по complexity:
 - "simple"  — до 3 фич, без внешних интеграций
@@ -201,6 +205,27 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "approach_notes": "особенности подхода"
   }
 
+- Для edu:
+  {
+    "subject": "english | math | programming | marketing | design | ...",   // что преподаём
+    "audience": "kids | school | students | adults | beginners | advanced",
+    "levels": "a1_c2 | begin_mid_adv | by_grade | none",
+    "lesson_format": "text | video | audio | interactive | mixed",
+    "lessons_count": число | "диапазон",          // например 12 или "10-15"
+    "lesson_duration": "...",                     // длительность одного урока (15 мин / 30 мин / 1 час)
+    "lesson_structure": "theory_examples_practice_test | custom",
+    "tests_mode": "after_lesson | end_of_module | final_exam | none",
+    "homework": "mandatory | optional | none | bot_practice_only",
+    "homework_check": "auto | manual_teacher | self_check_with_reference",
+    "error_explanation": "detailed | brief | answer_only | score_only",
+    "gamification": ["points", "certificates", "streak", "levels"] | "none",
+    "communication_style": "friendly_mentor | strict_teacher | playful_peer",
+    "reminders": "daily | scheduled | on_skip | none",
+    "teacher_transition": "on_complex | on_request | paid_upgrade_only | none",
+    "teacher_telegram_placeholder": true | false,    // true если клиент дал @ препода (значение НЕ копируй!)
+    "methodology_notes": "уникальность подхода, гарантии, типичные кейсы"
+  }
+
 КРИТИЧЕСКИ ВАЖНО по секретам:
 - Если в ответе клиента встречаются API-токены, пароли, ключи, контакты менеджера (@username, номер телефона) — НЕ копируй их значения в extras. Вместо значения ставь плейсхолдер-флаг (*_placeholder: true или has_*_token: true).
 - target_audience/purpose/key_features тоже НЕ должны содержать секретов.
@@ -219,6 +244,7 @@ class RequirementsSchema(BaseModel):
         "coach",
         "creative",
         "planner",
+        "edu",
     ]
     purpose: str = Field(min_length=1)
     target_audience: str = Field(min_length=1)

@@ -103,7 +103,7 @@ def test_analyst_agent_raises_after_two_failures(mock_run_agent):
     assert mock_run_agent.call_count == 2
 
 
-# ──── analyst bot_type Literal — all 8 types must validate ─────────
+# ──── analyst bot_type Literal — all 9 types must validate ─────────
 
 
 def test_analyst_classifies_service_orders(mock_run_agent):
@@ -161,7 +161,25 @@ def test_analyst_classifies_planner(mock_run_agent):
     assert result["bot_type"] == "planner"
 
 
-def test_analyst_prompt_enumerates_all_eight_types():
+def test_analyst_classifies_edu(mock_run_agent):
+    """edu must be a valid bot_type. Distinct from `coach`: edu teaches
+    a SUBJECT through a structured course (lessons, tests, homework,
+    knowledge checks); `coach` runs the user through a SKILLS PROGRAM
+    with progress tracking and personal motivation. «Учить ЗНАТЬ» → edu;
+    «Учить ДЕЛАТЬ» → coach."""
+    from agents.analyst import analyst_agent
+
+    payload = {**_VALID_REQUIREMENTS, "bot_type": "edu"}
+    mock_run_agent.return_value = json.dumps(payload)
+    result = analyst_agent(
+        "Курс английского A1-B2, 30 уроков, после каждого тест, "
+        "домашка с автопроверкой, сертификат по итогу"
+    )
+
+    assert result["bot_type"] == "edu"
+
+
+def test_analyst_prompt_enumerates_all_nine_types():
     """Schema and the system prompt must agree on which bot_types exist —
     if they drift the LLM either invents a value the validator rejects
     (retry burns tokens) or silently misclassifies into a base type.
@@ -178,6 +196,7 @@ def test_analyst_prompt_enumerates_all_eight_types():
         "coach",
         "creative",
         "planner",
+        "edu",
     }
     assert schema_types == expected, f"Schema drift: {schema_types ^ expected}"
 
