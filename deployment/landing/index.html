@@ -80,7 +80,8 @@ h1 {
 /* When count mod 3 == 1 (1, 4, 7, 10, ...) the last row holds a single
    orphan card; center it instead of pinning to the left. For count mod
    3 in {2} the two leftover cards in the last row stay left-aligned
-   (revisit when that case lands — currently 9 cards = 3+3+3, no orphan). */
+   (revisit when that case lands — currently 10 cards = 3+3+3+1, the
+   last card centers per this rule). */
 .feature:last-child:nth-child(3n+1) {
   grid-column: 1 / -1;
   justify-self: center;
@@ -150,6 +151,7 @@ footer {
     <div class="feature"><span class="feature-emoji">🎨</span><span>Креативные ассистенты</span></div>
     <div class="feature"><span class="feature-emoji">📋</span><span>Планировщики задач</span></div>
     <div class="feature"><span class="feature-emoji">🎓</span><span>Обучающие боты</span></div>
+    <div class="feature"><span class="feature-emoji">👥</span><span>HR-боты</span></div>
   </div>
 
   <a class="cta" href="https://t.me/ArmyBotsBot">Начать в Telegram →</a>
