@@ -37,6 +37,7 @@ from deployer import (
 )
 from db.repository import (
     anonymize_user,
+    check_consent,
     count_client_bots,
     delete_bot,
     get_active_subscription,
@@ -44,6 +45,7 @@ from db.repository import (
     get_bot_stats,
     get_chat_history,
     get_client_bots,
+    get_client_summary,
     get_daily_usage,
     get_limit_alerts_enabled,
     get_or_create_client,
@@ -52,6 +54,7 @@ from db.repository import (
     get_usage_stats,
     get_usage_trend,
     log_tokens,
+    revoke_consent,
     save_bot_config,
     save_chat_message,
     save_consent,
@@ -76,14 +79,33 @@ from services.rag import (
     list_knowledge_sources,
     search_knowledge,
 )
+from settings import settings
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
 
-CONSENT_TEXT = """Для создания бота мы обрабатываем ваш Telegram ID и username.
-Данные хранятся на серверах в России, третьим лицам не передаются.
-Вы можете удалить свои данные командой /delete_my_data
+def _build_consent_text() -> str:
+    parts = [
+        "Для создания бота мы обрабатываем ваш Telegram ID и username.",
+        "Данные хранятся на серверах в России (PostgreSQL, Redis).",
+        "",
+        "Для работы сервиса используются:",
+        "• Telegram API — передача всех сообщений для доставки вам",
+        "• OpenRouter (США) — генерация AI-ответов (передаются обезличенные данные бота и история чата)",
+        "• FusionBrain — генерация изображений (текстовые промпты)",
+        "",
+        "Вы можете удалить свои данные командой /delete_my_data",
+        "Просмотр ваших данных: /my_data",
+        "Отозвать согласие: /revoke_consent",
+    ]
+    if settings.privacy_policy_url:
+        parts.append(f"Политика обработки ПДн: {settings.privacy_policy_url}")
+    if settings.terms_url:
+        parts.append(f"Условия использования: {settings.terms_url}")
+    parts.extend(["", "Нажмите Согласен чтобы продолжить."])
+    return "\n".join(parts)
 
-Нажмите Согласен чтобы продолжить."""
+
+CONSENT_TEXT = _build_consent_text()
 
 
 class IntakeStates(StatesGroup):
@@ -114,6 +136,10 @@ class EditStates(StatesGroup):
     waiting_greeting = State()
 
 
+class PaymentStates(StatesGroup):
+    confirm_offer = State()
+
+
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [
@@ -133,6 +159,25 @@ def _format_question(q: dict, idx: int, total: int) -> str:
 
 
 router = Router()
+
+
+async def _require_consent(message: Message) -> bool:
+    """Check if user has consent. If not, show warning and return False.
+    Commands should check this and return early if False."""
+    user = message.from_user
+    if not user:
+        return False
+
+    has_consent = await check_consent(user.id)
+    if not has_consent:
+        await message.answer(
+            "⚠️ Вы отозвали согласие на обработку персональных данных.\n\n"
+            "Для продолжения работы с ботом необходимо дать согласие снова.\n"
+            "Используйте /start для повторного согласия.\n\n"
+            "Если вы хотите удалить свои данные, используйте /delete_my_data"
+        )
+        return False
+    return True
 
 
 # Persistent main menu shown after consent. 4×2 layout. Admins see
@@ -191,6 +236,11 @@ async def on_main_menu_button(message: Message, state: FSMContext) -> None:
         )
         return
 
+    # Check consent for all menu actions except /start and /help
+    if label not in ("➕ Создать бота", "❓ Помощь"):
+        if not await _require_consent(message):
+            return
+
     await state.clear()
 
     if label == "💬 Чат с ботом":
@@ -230,7 +280,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     if user is None:
         return
 
-    logger.info("intake: /start from tg_id={} username={}", user.id, user.username)
+    logger.info("intake: /start from tg_id={}", user.id)
     await state.clear()
     await get_or_create_client(user.id, user.username)
     await state.set_state(IntakeStates.consent)
@@ -363,7 +413,7 @@ async def on_answer(message: Message, state: FSMContext) -> None:
     answers[str(current_q["id"])] = {
         "question": current_q["text"],
         "answer": answer_text,
-        "sensitive": is_sensitive_question(current_q["text"]),
+        "sensitive": is_sensitive_question(current_q["text"], current_q.get("hint", "")),
     }
 
     next_idx = idx + 1
@@ -807,6 +857,9 @@ _TIER_LABEL_BY_SLUG: dict[str, str] = {
 
 @router.message(Command("usage"))
 async def cmd_usage(message: Message) -> None:
+    if not await _require_consent(message):
+        return
+
     user = message.from_user
     if user is None:
         return
@@ -957,6 +1010,9 @@ def _settings_text(bot_cfg, current: str) -> str:
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
+    if not await _require_consent(message):
+        return
+
     user = message.from_user
     if user is None:
         return
@@ -1093,6 +1149,9 @@ def _subscribe_keyboard() -> InlineKeyboardMarkup:
 
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message) -> None:
+    if not await _require_consent(message):
+        return
+
     await message.answer(
         "Выберите тариф подписки:", reply_markup=_subscribe_keyboard()
     )
@@ -1118,6 +1177,10 @@ async def cmd_help(message: Message) -> None:
         "⚙️ /settings — настройки бота",
         "💎 /subscribe — выбор тарифа",
         "➕ /start — создать нового бота",
+        "",
+        "🔒 /my_data — ваши данные в системе",
+        "🗑 /delete_my_data — удалить все данные",
+        "📄 /revoke_consent — отозвать согласие на обработку ПДн",
     ]
 
     client = await get_or_create_client(user.id, user.username)
@@ -1141,7 +1204,7 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.callback_query(F.data.startswith("subscribe:"))
-async def on_subscribe_choice(callback: CallbackQuery) -> None:
+async def on_subscribe_choice(callback: CallbackQuery, state: FSMContext) -> None:
     user = callback.from_user
     if user is None:
         return
@@ -1159,6 +1222,67 @@ async def on_subscribe_choice(callback: CallbackQuery) -> None:
         await callback.answer("Неизвестный тариф", show_alert=True)
         return
 
+    # Save tier and cycle to FSM and ask for offer agreement
+    await state.update_data(payment_tier=tier, payment_cycle=cycle)
+    await state.set_state(PaymentStates.confirm_offer)
+
+    plan_name = PLANS[tier]["name"]
+    cycle_label = "месяц" if cycle == "monthly" else "год"
+    price_key = "price_monthly" if cycle == "monthly" else "price_yearly"
+    price = PLANS[tier][price_key]
+
+    offer_text = (
+        f"Вы выбрали тариф: {plan_name} ({price}₽/{cycle_label})\n\n"
+        "Перед оплатой необходимо согласиться с условиями оферты.\n"
+    )
+    if settings.terms_url:
+        offer_text += f"Ознакомиться с офертой: {settings.terms_url}\n\n"
+
+    offer_text += "Согласны с условиями оферты?"
+
+    offer_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Согласен", callback_data="offer:accept"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="offer:cancel"),
+            ]
+        ]
+    )
+
+    if callback.message is not None:
+        await callback.message.answer(offer_text, reply_markup=offer_kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("offer:"), PaymentStates.confirm_offer)
+async def on_offer_confirmation(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        return
+
+    action = (callback.data or "").split(":")[1]
+
+    if action == "cancel":
+        await state.clear()
+        await callback.answer("Оплата отменена")
+        if callback.message is not None:
+            await callback.message.answer("Оплата отменена. /subscribe для выбора другого тарифа")
+        return
+
+    if action != "accept":
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
+
+    # User accepted the offer, proceed with payment
+    data = await state.get_data()
+    tier = data.get("payment_tier")
+    cycle = data.get("payment_cycle")
+
+    if not tier or not cycle:
+        await callback.answer("Ошибка: данные тарифа потеряны", show_alert=True)
+        await state.clear()
+        return
+
     try:
         client = await get_or_create_client(user.id, user.username)
         payment_url = await asyncio.to_thread(
@@ -1174,10 +1298,11 @@ async def on_subscribe_choice(callback: CallbackQuery) -> None:
         await callback.answer(
             "Не удалось создать платёж. Попробуйте позже.", show_alert=True
         )
+        await state.clear()
         return
 
     logger.info(
-        "billing: payment link sent client_id={} tier={} cycle={}",
+        "billing: payment link sent client_id={} tier={} cycle={} (offer accepted)",
         client.id,
         tier,
         cycle,
@@ -1187,6 +1312,7 @@ async def on_subscribe_choice(callback: CallbackQuery) -> None:
             f"Оплатите подписку по ссылке:\n{payment_url}"
         )
     await callback.answer()
+    await state.clear()
 
 
 CHAT_HISTORY_LIMIT = 10
@@ -1243,7 +1369,9 @@ async def _enter_chat_session(
     )
     await answer(
         f"Вы в режиме чата с ботом {bot_cfg.bot_name}.\n"
-        f"Отправляйте сообщения. /exit чтобы выйти."
+        f"Отправляйте сообщения. /exit чтобы выйти.\n\n"
+        f"⚠️ Внимание: не указывайте в чате персональные данные третьих лиц "
+        f"(ФИО, телефоны, адреса других людей). Ваши сообщения обрабатываются AI-моделью."
     )
 
     if is_admin(telegram_id):
@@ -1263,6 +1391,9 @@ async def _enter_chat_session(
 
 @router.message(Command("chat"))
 async def cmd_chat(message: Message, state: FSMContext) -> None:
+    if not await _require_consent(message):
+        return
+
     user = message.from_user
     if user is None:
         return
@@ -1379,6 +1510,9 @@ async def _render_mybots_list(client_id: int) -> tuple[str, InlineKeyboardMarkup
 
 @router.message(Command("mybots"))
 async def cmd_mybots(message: Message) -> None:
+    if not await _require_consent(message):
+        return
+
     user = message.from_user
     if user is None:
         return
@@ -2105,6 +2239,9 @@ def _is_image_request(text: str) -> bool:
 
 @router.message(Command("image"))
 async def cmd_image(message: Message, state: FSMContext) -> None:
+    if not await _require_consent(message):
+        return
+
     await state.set_state(ImageStates.waiting_prompt)
     await message.answer("Опишите картинку которую хотите создать")
 
@@ -2341,6 +2478,9 @@ async def _active_bot(client_id: int):
 
 @router.message(Command("teach"))
 async def cmd_teach(message: Message, state: FSMContext) -> None:
+    if not await _require_consent(message):
+        return
+
     user = message.from_user
     if user is None:
         return
@@ -2474,6 +2614,9 @@ async def on_teach_message(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("knowledge"))
 async def cmd_knowledge(message: Message) -> None:
+    if not await _require_consent(message):
+        return
+
     user = message.from_user
     if user is None:
         return
@@ -2565,6 +2708,84 @@ async def cb_kb_clear_yes(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.message(Command("revoke_consent"))
+async def cmd_revoke_consent(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+
+    try:
+        await revoke_consent(user.id)
+    except Exception:
+        logger.exception("intake: revoke_consent failed for tg_id={}", user.id)
+        await message.answer("Не удалось отозвать согласие. Попробуйте позже.")
+        return
+
+    logger.info("intake: consent revoked tg_id={}", user.id)
+    # TODO: block service access for users with consent_given=False.
+    # Currently consent_given is not checked in command guards — adding that
+    # requires touching every command handler entry-point.
+    await state.clear()
+    await message.answer(
+        "Согласие на обработку персональных данных отозвано.\n\n"
+        "Ваши данные остаются в системе до явного удаления.\n"
+        "Для полного удаления данных используйте /delete_my_data\n\n"
+        "⚠️ Без согласия дальнейшее использование сервиса невозможно.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@router.message(Command("my_data"))
+async def cmd_my_data(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        return
+
+    try:
+        summary = await get_client_summary(user.id)
+    except Exception:
+        logger.exception("my_data: failed for tg_id={}", user.id)
+        await message.answer("Не удалось получить данные. Попробуйте позже.")
+        return
+
+    if summary is None:
+        await message.answer("Вы не зарегистрированы. Используйте /start.")
+        return
+
+    lines = ["📋 Ваши данные в системе:", ""]
+    lines.append(f"Telegram ID: {summary['telegram_id']}")
+    if summary["username"]:
+        lines.append(f"Username: @{summary['username']}")
+    else:
+        lines.append("Username: не сохранён")
+    lines.append("")
+    consent_label = "дано" if summary["consent_given"] else "не дано / отозвано"
+    lines.append(f"Согласие на обработку: {consent_label}")
+    if summary["consent_at"]:
+        dt = summary["consent_at"].strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"Дата согласия: {dt}")
+    if summary["created_at"]:
+        lines.append(f"Дата регистрации: {summary['created_at'].strftime('%Y-%m-%d')}")
+    lines.append("")
+    lines.append(f"Ботов создано: {summary['bot_count']}")
+    if summary["subscription_tier"]:
+        lines.append(f"Подписка: тариф {summary['subscription_tier']}")
+        if summary["subscription_expires_at"]:
+            exp = summary["subscription_expires_at"].strftime("%Y-%m-%d")
+            lines.append(f"Истекает: {exp}")
+    else:
+        lines.append("Подписка: нет активной")
+    lines.append(f"Сообщений в истории чата: {summary['chat_message_count']}")
+    lines.append(f"Фрагментов базы знаний: {summary['knowledge_chunk_count']}")
+    lines.extend([
+        "",
+        "Для удаления данных: /delete_my_data",
+        "Для отзыва согласия: /revoke_consent",
+    ])
+
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("delete_my_data"))
 async def cmd_delete(message: Message, state: FSMContext) -> None:
     user = message.from_user
@@ -2588,12 +2809,10 @@ async def cmd_delete(message: Message, state: FSMContext) -> None:
     )
 
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN env var is required")
+BOT_TOKEN = settings.bot_token
 
 bot = Bot(token=BOT_TOKEN)
-storage = RedisStorage.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+storage = RedisStorage.from_url(settings.redis_url)
 dp = Dispatcher(storage=storage)
 dp.include_router(router)
 

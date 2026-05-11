@@ -51,6 +51,18 @@ async def get_or_create_client(
         return client
 
 
+async def check_consent(telegram_id: int) -> bool:
+    """Check if user has given consent. Returns True if consent is given, False otherwise."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client).where(Client.telegram_id == telegram_id)
+        )
+        client = result.scalar_one_or_none()
+        if client is None:
+            return False
+        return client.consent_given
+
+
 async def save_consent(telegram_id: int, consent_text: str) -> None:
     async with get_session() as session:
         result = await session.execute(
@@ -794,3 +806,59 @@ async def get_active_subscription(client_id: int) -> Subscription | None:
         if sub is not None:
             session.expunge(sub)
         return sub
+
+
+async def get_client_summary(telegram_id: int) -> dict[str, Any] | None:
+    """Read-only summary of all data stored for this user. Used by /my_data."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client).where(Client.telegram_id == telegram_id)
+        )
+        client = result.scalar_one_or_none()
+        if client is None:
+            return None
+
+        bot_count = await session.scalar(
+            select(func.count(BotConfig.id)).where(
+                BotConfig.client_id == client.id
+            )
+        )
+
+        now = _utcnow()
+        sub_result = await session.execute(
+            select(Subscription)
+            .where(
+                Subscription.client_id == client.id,
+                Subscription.status == "active",
+                Subscription.expires_at > now,
+            )
+            .order_by(Subscription.expires_at.desc())
+            .limit(1)
+        )
+        sub = sub_result.scalar_one_or_none()
+
+        chat_count = await session.scalar(
+            select(func.count(ChatHistory.id)).where(
+                ChatHistory.client_id == client.id
+            )
+        )
+
+        kb_count = await session.scalar(
+            select(func.count(KnowledgeChunk.id)).where(
+                KnowledgeChunk.client_id == client.id
+            )
+        )
+
+        return {
+            "telegram_id": client.telegram_id,
+            "username": client.username,
+            "consent_given": client.consent_given,
+            "consent_at": client.consent_at,
+            "data_deleted": client.data_deleted,
+            "created_at": client.created_at,
+            "bot_count": int(bot_count or 0),
+            "subscription_tier": sub.tier if sub else None,
+            "subscription_expires_at": sub.expires_at if sub else None,
+            "chat_message_count": int(chat_count or 0),
+            "knowledge_chunk_count": int(kb_count or 0),
+        }

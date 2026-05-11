@@ -18,7 +18,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 
 Схема ответа:
 {
-  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative" | "planner" | "edu" | "hr",
+  "bot_type": "parser" | "seller" | "content" | "support" | "service_orders" | "coach" | "creative" | "planner" | "edu" | "hr" | "quiz" | "real_estate" | "events" | "finance",
   "purpose": "краткое описание цели бота (1-2 предложения)",
   "target_audience": "кто будет использовать бота",
   "key_features": ["фича1", "фича2", ...],
@@ -39,6 +39,10 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - "planner"        — управляет ЗАДАЧАМИ И ВРЕМЕНЕМ пользователя (списки дел, привычки, цели, напоминания, аналитика выполнения, GTD/Bullet Journal/Pomodoro). Универсальный продуктивности-бот, не привязан к конкретной программе обучения. Часто с расписанными напоминаниями и streak-счётчиками
 - "edu"            — ПРЕПОДАЁТ ПРЕДМЕТ через структурированный курс уроков с тестами, домашними заданиями и проверкой знаний (английский, математика, программирование, маркетинг, дизайн). Уроки → теория → примеры → практика → тест → ДЗ. Прогресс по уровням (A1-C2 / начинающий-продвинутый / по классам). Часто с сертификатами и геймификацией streak/баллы
 - "hr"             — НАНИМАЕТ КАНДИДАТОВ через автоматизированную воронку рекрутинга (скрининг резюме/анкет → тесты на знания → видео-интервью → передача прошедших HR-менеджеру или руководителю). Для компаний с большим объёмом найма. Этапы funnel'а: заявка → screening → тест → интервью → оффер → онбординг. Часто с базой знаний о компании, обработкой отказов и уведомлениями в Telegram/email/CRM
+- "quiz"           — ОПРОСЫ/ВИКТОРИНЫ/ТЕСТЫ для лидогенерации и сегментации (квиз-личность, викторина на знания, калькулятор, подбор продукта). Серия вопросов (5-12 шт) с вариантами ответов → подсчёт результатов → показ типа результата / передача лида в CRM. Цель: квалификация лидов, вовлечение, развлечение. Часто с геймификацией (прогресс-бар, баллы, таймер) и сбором контактов (имя, телефон, email) до/в середине/после квиза
+- "real_estate"    — ПОДБОР НЕДВИЖИМОСТИ (продажа/аренда квартир, коммерческая, загородная). База объектов с фильтрами (цена, район, метраж, этаж) → показ фото/видео/описания → запись на показ к риэлтору. Часто с ипотечным калькулятором, парсингом площадок (Avito, ЦИАН), интеграцией с CRM, юридическим сопровождением. Для риэлторов, агентств, застройщиков
+- "events"         — РЕГИСТРАЦИЯ НА МЕРОПРИЯТИЯ (конференции, вебинары, тренинги, концерты, выставки). Продажа билетов (бесплатных/платных, типы: стандарт/VIP/онлайн) → сбор данных участника (имя, должность, компания) → генерация QR-билета → расписание/программа → напоминания → check-in на входе → обратная связь/материалы после. Часто с нетворкингом, интеграцией ЮKassa, аналитикой явки
+- "finance"        — УЧЁТ ЛИЧНЫХ/БИЗНЕС ФИНАНСОВ (доходы, расходы, бюджет). Ввод операций (текст, голос, фото чека) с категориями → планирование лимитов по категориям → уведомления о превышении → отчёты (графики, сравнение по месяцам, топ категорий). Часто с периодическими платежами (подписки, аренда), напоминаниями о налогах для ИП, экспортом в Excel/Google таблицы, мультивалютностью. Для личного учёта, семьи, малого бизнеса, фрилансеров
 
 Различия похожих типов (ВАЖНО — не путать):
 - seller vs service_orders — продаёт ТОВАР (его привезут/отдадут) → seller; продаёт УСЛУГУ С ЗАПИСЬЮ на конкретный слот к конкретному мастеру → service_orders. Если есть «график мастеров» / «свободные часы» / «бронирование» — это service_orders, даже если бизнес называет это «продажа».
@@ -55,6 +59,15 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - hr vs edu — edu ОБУЧАЕТ ученика и проверяет усвоение материала; hr ТЕСТИРУЕТ кандидата на готовые знания/навыки для принятия решения о найме (тесты — инструмент скрининга, не обучения, и они ИДУТ ОДНОКРАТНО, без курса). Если есть «уроки», «ДЗ», «уровни» → edu; если есть «вакансии», «кандидаты», «оффер», «воронка» → hr
 - hr vs seller — seller продаёт ТОВАР/УСЛУГУ клиенту (компания → клиент); hr нанимает СОТРУДНИКА (компания ↔ кандидат, обратное направление: компания «продаёт себя» соискателю и одновременно оценивает его). Если есть «прайс», «корзина», «доставка» → seller; если есть «вакансии», «опыт работы», «зарплатные ожидания» → hr
 - hr vs service_orders — service_orders записывает клиентов на УСЛУГУ (стрижка, маникюр, консультация) с расписанием мастеров; hr ведёт КАНДИДАТОВ по этапам найма (несколько собеседований растянуты во времени, но это не «запись на услугу»). Если бот бронирует слот к мастеру → service_orders; если бот ведёт кандидата по воронке → hr
+- quiz vs edu — quiz проводит РАЗОВЫЙ тест/опрос для квалификации лидов и сегментации (5-12 вопросов, цель — собрать контакты и передать в CRM); edu ведёт ученика по МНОГОНЕДЕЛЬНОМУ курсу с уроками, ДЗ, проверкой знаний. Если «одноразовая викторина для лидогенерации» → quiz; если «курс из 20 уроков с тестами после каждого» → edu
+- quiz vs support — quiz АКТИВНО задаёт вопросы клиенту для сегментации (бот ведёт диалог); support ОТВЕЧАЕТ на вопросы клиента из FAQ (клиент ведёт диалог). Если бот «спрашивает клиента чтобы понять его потребности» → quiz; если бот «отвечает на вопросы клиента» → support
+- quiz vs creative — quiz собирает ответы клиента для КВАЛИФИКАЦИИ лида/сегментации (цель — понять кто клиент); creative ГЕНЕРИРУЕТ идеи для клиента через методики мышления (цель — помочь придумать). Если «опрос для подбора продукта» → quiz; если «брейншторм идей» → creative
+- real_estate vs service_orders — real_estate ПОДБИРАЕТ объекты недвижимости из базы по фильтрам (цена, район, метраж) и записывает на ПОКАЗ объекта; service_orders записывает на УСЛУГУ мастера (стрижка, маникюр, консультация) по расписанию. Если есть «база квартир», «фильтры поиска», «ипотека» → real_estate; если есть «график мастеров», «услуги с длительностью», «бронь слота» → service_orders
+- real_estate vs seller — real_estate ПОДБИРАЕТ недвижимость из базы с фильтрами и записывает на показ (сделка происходит оффлайн после показа); seller ПРОДАЁТ товар напрямую в боте с корзиной и оплатой. Если «база квартир с фильтрами + запись на показ» → real_estate; если «каталог товаров + корзина + оплата онлайн» → seller
+- events vs service_orders — events регистрирует УЧАСТНИКОВ на МЕРОПРИЯТИЕ (конференция, концерт) с продажей билетов, QR-кодами, расписанием, нетворкингом; service_orders записывает КЛИЕНТА на УСЛУГУ к мастеру (барбершоп, СПА) по расписанию. Если есть «билеты», «QR-коды», «программа события», «check-in», «обратная связь после» → events; если есть «график мастеров», «услуги с длительностью», «бронь слота» → service_orders
+- events vs seller — events продаёт БИЛЕТЫ на мероприятие (разовая покупка доступа к событию) с регистрацией участника, расписанием, материалами; seller продаёт ТОВАРЫ (физические/цифровые) с доставкой/выдачей. Если «билеты на конференцию + регистрация + программа» → events; если «каталог товаров + корзина + доставка» → seller
+- finance vs planner — finance учитывает ФИНАНСОВЫЕ ОПЕРАЦИИ (доходы/расходы, бюджет, категории, лимиты, отчёты по деньгам); planner управляет ЗАДАЧАМИ и ВРЕМЕНЕМ (списки дел, привычки, цели, напоминания, без финансовой составляющей). Если «расходы по категориям», «бюджет», «лимиты на месяц» → finance; если «списки дел», «привычки», «GTD» → planner
+- finance vs seller — finance УЧИТЫВАЕТ финансы пользователя (личный/семейный бюджет, расходы/доходы); seller ПРОДАЁТ товары клиенту (каталог, корзина, оплата). Если «учёт расходов клиента», «бюджет», «категории трат» → finance; если «каталог товаров», «корзина», «доставка» → seller
 
 Правила по complexity:
 - "simple"  — до 3 фич, без внешних интеграций
@@ -253,6 +266,89 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "process_notes": "уникальные практики найма, культурные особенности"
   }
 
+- Для quiz:
+  {
+    "niche": "недвижимость | маркетинг | фитнес | ...",   // ниша бизнеса
+    "quiz_goal": "leads | segmentation | entertainment | product_match",
+    "audience": "целевая аудитория",
+    "quiz_type": "personality | knowledge | calculator | product_selection | survey",
+    "questions_count": число,                              // сколько вопросов в квизе (рекомендуется 5-12)
+    "question_format": "single_choice | multiple_choice | text_input | scale_1_10 | mixed",
+    "sample_questions": ["вопрос 1", "вопрос 2", ...],    // примеры вопросов из анкеты
+    "scoring_logic": "points | personality_type | categories | formula",
+    "result_types": ["новичок", "продвинутый", ...],      // варианты результатов квиза
+    "after_quiz_action": "show_result | send_pdf | book_consultation | transfer_to_manager",
+    "collect_contacts": "before | middle | after | none",  // когда собирать контакты
+    "contact_fields": ["name", "phone", "email"],
+    "lead_destination": "telegram | crm | google_sheets | email",
+    "lead_destination_placeholder": true | false,          // true если клиент дал контакт (значение НЕ копируй!)
+    "gamification": ["progress_bar", "timer", "streak", "points"] | "none",
+    "tone": "friendly | professional | playful | motivating",
+    "retargeting": "allow_retake | remind_later | one_time_only",
+    "extra_features": ["comparison", "leaderboard", "share_results", "referral"] | []
+  }
+
+- Для real_estate:
+  {
+    "business_type": "realtor | agency | developer | marketplace",
+    "property_type": "sale_apartments | rent | commercial | country | all",
+    "geography": "город и районы",
+    "objects_source": "own_database | parse_avito_cian | crm_integration | manual",
+    "filter_criteria": ["price", "district", "area_sqm", "floor", "renovation", ...],
+    "display_format": "photo_description | video | virtual_tour | link_to_platform",
+    "viewing_booking": "bot_books | forward_to_manager",
+    "lead_destination": "telegram | crm | email",
+    "realtor_telegram_placeholder": true | false,          // true если клиент дал @ риэлтора (значение НЕ копируй!)
+    "mortgage_support": "yes_approval_help | yes_partner_banks | no",
+    "mortgage_calculator": true | false,
+    "legal_services": "yes | no",
+    "legal_services_description": "...",
+    "commission": "...",
+    "commission_terms": "...",
+    "unique_advantages": "...",
+    "tone": "professional_expert | friendly_helper | business_consultant",
+    "extra_notes": "особенности работы, частые вопросы, запреты"
+  }
+
+- Для events:
+  {
+    "event_types": ["conference", "webinar", "training", "concert", "exhibition", "networking"],
+    "format": "online | offline | hybrid",
+    "frequency": "one_time | weekly | monthly | series",
+    "audience": "профессионалы | студенты | широкая публика | b2b",
+    "registration_type": "free | paid | mixed",           // бесплатная / платная / смешанная
+    "ticket_types": [{"name": "...", "price": "...", "limit": число}, ...],
+    "payment_method": "yukassa | bank_transfer | free_event",
+    "registration_fields": ["name", "position", "company", "phone", "email", "dietary_preferences"],
+    "program_schedule": true | false,                      // присылать ли расписание спикеров
+    "reminders": "week_before | day_before | hour_before | multiple | none",
+    "networking": true | false,                            // помогать участникам знакомиться
+    "qr_tickets": true | false,                            // генерировать QR-коды для входа
+    "check_in": true | false,                              // отмечать явку участников
+    "feedback_collection": "reviews | speaker_ratings | nps | none",
+    "materials_distribution": ["presentations", "recordings", "certificates"] | "none",
+    "special_mechanics": "уникальные механики, геймификация, призы"
+  }
+
+- Для finance:
+  {
+    "user_scope": "personal | family | small_business | freelancers | team",
+    "tracking_mode": "expenses_only | income_expenses | budget_by_categories | investments",
+    "expense_categories": ["продукты", "транспорт", "развлечения", ...],
+    "income_categories": ["зарплата", "фриланс", "инвестиции", ...],
+    "input_format": "text | voice | photo_receipt | category_buttons | mixed",
+    "currency": "rub_only | multi_currency | crypto",
+    "budget_planning": "category_limits | savings_goals | none",
+    "notifications": "daily_summary | limit_exceeded | payment_reminders | none",
+    "reports": ["expense_charts", "month_comparison", "top_categories", "balance"] | "none",
+    "recurring_payments": true | false,                    // учитывать подписки, аренду, кредиты
+    "export_data": "excel | google_sheets | pdf | none",
+    "shared_access": "family_budget | multiple_users | personal_only",
+    "investments_tracking": true | false,                  // учитывать акции, криптовалюту, недвижимость
+    "tax_reminders": "ip_usn | ip_patent | none",        // напоминания о налогах для ИП
+    "extra_features": ["debts_loans", "split_receipts", "financial_goals_checklist"] | []
+  }
+
 КРИТИЧЕСКИ ВАЖНО по секретам:
 - Если в ответе клиента встречаются API-токены, пароли, ключи, контакты менеджера (@username, номер телефона) — НЕ копируй их значения в extras. Вместо значения ставь плейсхолдер-флаг (*_placeholder: true или has_*_token: true).
 - target_audience/purpose/key_features тоже НЕ должны содержать секретов.
@@ -273,6 +369,10 @@ class RequirementsSchema(BaseModel):
         "planner",
         "edu",
         "hr",
+        "quiz",
+        "real_estate",
+        "events",
+        "finance",
     ]
     purpose: str = Field(min_length=1)
     target_audience: str = Field(min_length=1)
