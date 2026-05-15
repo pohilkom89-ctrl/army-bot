@@ -5,8 +5,9 @@ change a price or a limit here, it propagates to billing payments, Telegram
 UI buttons, token-bucket enforcement, and the /usage display. Do not inline
 any of these numbers anywhere else.
 """
-import os
 from typing import Any
+
+from settings import settings
 
 
 def _parse_admin_ids(raw: str) -> list[int]:
@@ -24,9 +25,7 @@ def _parse_admin_ids(raw: str) -> list[int]:
 
 # Comma-separated Telegram user IDs. Admins bypass subscription checks and
 # don't have their tokens logged against any plan.
-ADMIN_TELEGRAM_IDS: list[int] = _parse_admin_ids(
-    os.getenv("ADMIN_TELEGRAM_IDS", "")
-)
+ADMIN_TELEGRAM_IDS: list[int] = _parse_admin_ids(settings.admin_telegram_ids)
 
 
 def is_admin(telegram_id: int | None) -> bool:

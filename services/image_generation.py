@@ -6,13 +6,15 @@ import os
 import aiohttp
 from loguru import logger
 
+from settings import settings
+
 
 class ImageGenerator:
     BASE_URL = "https://api-key.fusionbrain.ai/"
 
     def __init__(self):
-        self.api_key = os.getenv("FUSIONBRAIN_API_KEY")
-        self.secret_key = os.getenv("FUSIONBRAIN_SECRET_KEY")
+        self.api_key = settings.fusionbrain_api_key
+        self.secret_key = settings.fusionbrain_secret_key
         self.enabled = bool(self.api_key and self.secret_key)
         if not self.enabled:
             logger.warning(

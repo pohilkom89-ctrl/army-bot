@@ -16,8 +16,10 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
-_FACTORY_URL = os.getenv("FACTORY_URL", "http://host.docker.internal:8080")
-_INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+from settings import settings
+
+_FACTORY_URL = settings.factory_url
+_INTERNAL_API_KEY = settings.internal_api_key
 _BOT_ID_RAW = os.getenv("BOT_ID", "")
 _BOT_ID = int(_BOT_ID_RAW) if _BOT_ID_RAW.isdigit() else None
 

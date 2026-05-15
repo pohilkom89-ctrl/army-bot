@@ -112,6 +112,7 @@ class Subscription(Base):
         index=True,
     )
 
+    # FIXME: column name has a typo (yukassa → yookassa) — fix requires migration
     yukassa_payment_id = Column(String(64), nullable=True, index=True)
     # pending | active | canceled | expired
     status = Column(String(32), nullable=False)

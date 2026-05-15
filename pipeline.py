@@ -8,13 +8,14 @@ from loguru import logger
 from openai import OpenAI
 
 from config import MODELS
+from settings import settings
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-MODEL_AGENTS = os.getenv("OPENROUTER_MODEL_AGENTS", "deepseek/deepseek-chat-v3.1")
+OPENROUTER_BASE_URL = settings.openrouter_base_url
+MODEL_AGENTS = settings.openrouter_model_agents
 # Legacy default when a caller of run_bot_query doesn't pass tier — points
 # at the balanced tier so behaviour stays the same for callers that didn't
 # opt into multi-LLM routing.
-MODEL_BOTS = os.getenv("OPENROUTER_MODEL_BOTS", MODELS["balanced"])
+MODEL_BOTS = settings.openrouter_model_bots
 MAX_TOKENS = 4096
 
 # Whitelist of fields allowed into LLM prompts. Anything else (telegram_id,

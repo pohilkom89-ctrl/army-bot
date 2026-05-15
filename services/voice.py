@@ -1,16 +1,16 @@
 # TODO: подключим когда будут клиенты с запросом на голос.
 # Варианты: Groq (бесплатно, US) или Yandex SpeechKit (РФ, платно)
 
-import os
-
 import aiohttp
 from loguru import logger
+
+from settings import settings
 
 
 async def transcribe_voice(
     file_bytes: bytes, mime: str = "audio/ogg"
 ) -> str | None:
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    api_key = settings.openrouter_api_key
     if not api_key:
         return None
     try:

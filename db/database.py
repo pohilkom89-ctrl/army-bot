@@ -1,4 +1,3 @@
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -8,10 +7,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://admin:changeme@localhost:5432/botfactory",
-)
+from settings import settings
+
+DATABASE_URL = settings.database_url
 
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 

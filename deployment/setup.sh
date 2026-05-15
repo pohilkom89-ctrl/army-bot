@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Bot Factory — initial server bootstrap for Ubuntu 22.04 LTS.
-# Automates steps 1-2 from deployment/README.md on a clean Selectel VM.
+# Automates steps 1-2 from deployment/README.md on a clean Beget VM.
 #
 # Usage (as root):
 #   curl -fsSL https://raw.githubusercontent.com/<org>/army-bot/main/deployment/setup.sh | bash

@@ -9,6 +9,7 @@ from yookassa import Configuration, Payment
 
 from config import CYCLES, PLANS
 from db.repository import create_subscription, find_subscription_by_payment_id
+from settings import settings
 
 # How long we're willing to wait for YooKassa's API to confirm a payment
 # status before giving up. Webhook handlers should not block on remote
@@ -33,11 +34,11 @@ def _configure() -> None:
     global _configured
     if _configured:
         return
-    shop_id = os.getenv("YUKASSA_SHOP_ID")
-    secret_key = os.getenv("YUKASSA_SECRET_KEY")
+    shop_id = settings.yookassa_shop_id
+    secret_key = settings.yookassa_secret_key
     if not shop_id or not secret_key:
         raise RuntimeError(
-            "YUKASSA_SHOP_ID and YUKASSA_SECRET_KEY env vars are required"
+            "YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY env vars are required"
         )
     Configuration.account_id = shop_id
     Configuration.secret_key = secret_key
@@ -57,7 +58,7 @@ def create_payment(client_id: int, tier: str, cycle: str) -> str:
     cycle_label = "месяц" if cycle == "monthly" else "год"
     description = f'Bot Factory — {plan["name"]} ({cycle_label})'
 
-    return_url = os.getenv("BILLING_RETURN_URL", "https://t.me/")
+    return_url = settings.billing_return_url or "https://t.me/"
 
     payment = Payment.create(
         {
@@ -105,7 +106,7 @@ async def verify_payment_status(
       None  — could not verify (missing credentials / timeout / API error);
               caller should log and accept defensively rather than block.
     """
-    if not (os.getenv("YUKASSA_SHOP_ID") and os.getenv("YUKASSA_SECRET_KEY")):
+    if not (settings.yookassa_shop_id and settings.yookassa_secret_key):
         return None
     try:
         actual = await asyncio.wait_for(

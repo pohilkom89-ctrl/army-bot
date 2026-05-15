@@ -27,13 +27,12 @@ from openai import OpenAI
 from sqlalchemy import text
 
 from db.database import get_session
+from settings import settings
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_BASE_URL = settings.openrouter_base_url
 
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", OPENROUTER_BASE_URL)
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL", "openai/text-embedding-3-small"
-)
+EMBEDDING_BASE_URL = settings.embedding_base_url
+EMBEDDING_MODEL = settings.embedding_model
 EMBEDDING_DIM = 1536
 
 CHUNK_SIZE_TOKENS = 500
