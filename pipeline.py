@@ -275,3 +275,43 @@ def regenerate_system_prompt(bot_config: dict[str, Any]) -> str:
         if key in bot_config and bot_config[key] not in (None, "", [], {}):
             architecture[key] = bot_config[key]
     return prompt_engineer_agent(architecture)
+
+
+def merge_bots_prompt(name: str, bots: list[Any]) -> str:
+    """Generate a unified system prompt for a merged bot.
+
+    Combines the architectures of all source bots into a single merged
+    architecture and runs it through prompt_engineer_agent to produce
+    a coherent multi-role system prompt.
+    """
+    sources = []
+    combined_handlers: list[Any] = []
+    for bot in bots:
+        cfg = bot.config_json or {}
+        arch = cfg.get("architecture") or {}
+        handlers = arch.get("handlers", [])
+        combined_handlers.extend(handlers)
+        sources.append({
+            "name": bot.bot_name,
+            "type": bot.bot_type,
+            "purpose": arch.get("purpose") or cfg.get("purpose", ""),
+            "main_flow": arch.get("main_flow", ""),
+        })
+
+    merged_arch = {
+        "bot_name": name,
+        "bot_type": "merged",
+        "purpose": (
+            f"Многофункциональный бот «{name}», объединяющий "
+            f"{len(sources)} специализации: "
+            + ", ".join(s["name"] for s in sources)
+        ),
+        "merged_from": sources,
+        "handlers": combined_handlers,
+        "data_storage": "postgresql",
+        "note": (
+            "Определяй намерение пользователя и помогай в рамках всех "
+            "доступных специализаций бота."
+        ),
+    }
+    return prompt_engineer_agent(merged_arch)

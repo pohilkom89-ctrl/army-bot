@@ -54,6 +54,7 @@ from db.repository import (
     get_usage_stats,
     get_usage_trend,
     log_tokens,
+    mark_bots_merged,
     revoke_consent,
     save_bot_config,
     save_chat_message,
@@ -65,6 +66,7 @@ from db.repository import (
 )
 from pipeline import (
     _token_accumulator,
+    merge_bots_prompt,
     regenerate_system_prompt,
     run_bot_query,
     run_pipeline,
@@ -138,6 +140,11 @@ class EditStates(StatesGroup):
 
 class PaymentStates(StatesGroup):
     confirm_offer = State()
+
+
+class MergeStates(StatesGroup):
+    selecting = State()
+    naming = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -1430,6 +1437,7 @@ _BOT_TYPE_RU: dict[str, str] = {
     "seller": "Продавец",
     "content": "Контент",
     "support": "Поддержка",
+    "merged": "Объединённый",
 }
 
 
@@ -1506,6 +1514,156 @@ async def _render_mybots_list(client_id: int) -> tuple[str, InlineKeyboardMarkup
             f"   Запросов: {_format_num(req_count)}"
         )
     return "\n\n".join(lines), _mybots_keyboard(bots)
+
+
+def _merge_keyboard(
+    bots: list, selected: list[int], limit: int
+) -> InlineKeyboardMarkup:
+    rows = []
+    for b in bots:
+        mark = "✅" if b.id in selected else "⬜"
+        rows.append([InlineKeyboardButton(
+            text=f"{mark} {b.bot_name} ({_bot_type_ru(b.bot_type)})",
+            callback_data=f"merge:toggle:{b.id}",
+        )])
+    if len(selected) >= 2:
+        n = len(selected)
+        label = _ru_plural(n, ("бота", "бота", "ботов"))
+        rows.append([InlineKeyboardButton(
+            text=f"Объединить {n} {label} →",
+            callback_data="merge:confirm",
+        )])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="merge:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("merge_bots"))
+async def cmd_merge_bots(message: Message, state: FSMContext) -> None:
+    if not await _require_consent(message):
+        return
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    sub = await get_active_subscription(client.id)
+    tier = sub.tier if (sub and sub.status == "active") else "starter"
+    merge_limit: int = PLANS[tier].get("merge_limit", 0)
+
+    if merge_limit < 2:
+        await message.answer(
+            "Объединение ботов доступно начиная с тарифа Про.\n"
+            "/usage — посмотреть текущий тариф."
+        )
+        return
+
+    bots = await get_client_bots(client.id)
+    if len(bots) < 2:
+        await message.answer(
+            "Нужно минимум 2 бота для объединения. Создайте ещё через /start."
+        )
+        return
+
+    await state.set_state(MergeStates.selecting)
+    await state.update_data(client_id=client.id, selected=[], limit=merge_limit)
+    plan_name = PLANS[tier]["name"]
+    await message.answer(
+        f"Выберите боты для объединения (до {merge_limit} на тарифе {plan_name}):\n"
+        "Объединённый бот наследует токен первого выбранного бота.",
+        reply_markup=_merge_keyboard(bots, [], merge_limit),
+    )
+
+
+@router.callback_query(MergeStates.selecting, F.data.startswith("merge:toggle:"))
+async def cb_merge_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    data = await state.get_data()
+    selected: list[int] = list(data.get("selected", []))
+    limit: int = data["limit"]
+    client_id: int = data["client_id"]
+
+    if bot_id in selected:
+        selected.remove(bot_id)
+    elif len(selected) < limit:
+        selected.append(bot_id)
+    else:
+        await callback.answer(
+            f"Максимум {limit} бота для вашего тарифа", show_alert=True
+        )
+        return
+
+    await state.update_data(selected=selected)
+    bots = await get_client_bots(client_id)
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(
+            reply_markup=_merge_keyboard(bots, selected, limit)
+        )
+    await callback.answer()
+
+
+@router.callback_query(MergeStates.selecting, F.data == "merge:confirm")
+async def cb_merge_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if len(data.get("selected", [])) < 2:
+        await callback.answer("Выберите минимум 2 бота", show_alert=True)
+        return
+    await state.set_state(MergeStates.naming)
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("Введите название для объединённого бота:")
+    await callback.answer()
+
+
+@router.callback_query(MergeStates.selecting, F.data == "merge:cancel")
+async def cb_merge_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("Отменено.")
+    await callback.answer()
+
+
+@router.message(MergeStates.naming)
+async def on_merge_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if not name or len(name) > 64:
+        await message.answer("Название должно быть от 1 до 64 символов.")
+        return
+
+    data = await state.get_data()
+    selected_ids: list[int] = data.get("selected", [])
+    client_id: int = data["client_id"]
+    await state.clear()
+
+    bots = [await get_bot_by_id(bid, client_id) for bid in selected_ids]
+    bots = [b for b in bots if b is not None]
+    if len(bots) < 2:
+        await message.answer("Что-то пошло не так. Попробуйте снова: /merge_bots")
+        return
+
+    wait_msg = await message.answer(f"Создаю объединённого бота «{name}»...")
+
+    try:
+        system_prompt = await asyncio.to_thread(merge_bots_prompt, name, bots)
+        merged = await save_bot_config(
+            client_id=client_id,
+            bot_type="merged",
+            bot_name=name,
+            system_prompt=system_prompt,
+            config={"merged_from": selected_ids},
+            bot_token=bots[0].bot_token,
+        )
+        await mark_bots_merged(selected_ids, merged.id)
+        source_names = ", ".join(b.bot_name for b in bots)
+        await wait_msg.edit_text(
+            f"Готово! Бот «{name}» создан.\n"
+            f"Объединил: {source_names}\n\n"
+            "Управление: /mybots"
+        )
+    except Exception as exc:
+        logger.error("merge_bots: failed for client_id={}: {}", client_id, exc)
+        await wait_msg.edit_text(
+            "Ошибка при создании объединённого бота. Попробуйте позже."
+        )
 
 
 @router.message(Command("mybots"))

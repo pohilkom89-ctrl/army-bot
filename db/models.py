@@ -77,6 +77,10 @@ class BotConfig(Base):
     # active | paused — управляется клиентом через /mybots (is_active остаётся
     # булевым soft-delete-флагом, status отражает runtime-состояние).
     status = Column(String(32), nullable=False, default="active")
+    # Set to the merged bot's id when this bot is absorbed by /merge_bots.
+    # Bots with merged_into != NULL are hidden from /mybots and don't count
+    # against bots_limit.
+    merged_into = Column(Integer, nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     client = relationship("Client", back_populates="bots")

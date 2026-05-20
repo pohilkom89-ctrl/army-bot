@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from config import PLANS
 from db.database import get_session
@@ -128,7 +128,10 @@ async def get_client_bots(client_id: int) -> list[BotConfig]:
     async with get_session() as session:
         result = await session.execute(
             select(BotConfig)
-            .where(BotConfig.client_id == client_id)
+            .where(
+                BotConfig.client_id == client_id,
+                BotConfig.merged_into.is_(None),
+            )
             .order_by(BotConfig.created_at.desc())
         )
         bots = list(result.scalars().all())
@@ -250,6 +253,17 @@ async def delete_bot(bot_id: int, client_id: int) -> bool:
         return True
 
 
+async def mark_bots_merged(source_ids: list[int], merged_into_id: int) -> None:
+    """Mark source bots as absorbed by a merge. They become hidden from
+    /mybots and no longer count against bots_limit."""
+    async with get_session() as session:
+        await session.execute(
+            update(BotConfig)
+            .where(BotConfig.id.in_(source_ids))
+            .values(merged_into=merged_into_id)
+        )
+
+
 async def get_bot_stats(
     bot_id: int, client_id: int
 ) -> dict[str, Any] | None:
@@ -366,7 +380,10 @@ async def count_client_bots(client_id: int) -> int:
         result = await session.execute(
             select(func.count())
             .select_from(BotConfig)
-            .where(BotConfig.client_id == client_id)
+            .where(
+                BotConfig.client_id == client_id,
+                BotConfig.merged_into.is_(None),
+            )
         )
         return int(result.scalar_one() or 0)
 
