@@ -40,15 +40,17 @@ PLANS: dict[str, dict[str, Any]] = {
         "bots_limit": 1,
         "tokens_limit": 1_000_000,
         "merge_limit": 0,
+        "multitype_limit": 1,
         "description": "1 бот, 1М токенов/мес",
     },
     "pro": {
         "name": "Про",
-        "price_monthly": 990,
+        "price_monthly": 949,
         "price_yearly": 9500,
         "bots_limit": 3,
         "tokens_limit": 5_000_000,
         "merge_limit": 2,
+        "multitype_limit": 2,
         "description": "3 бота, 5М токенов/мес",
     },
     "business": {
@@ -58,6 +60,7 @@ PLANS: dict[str, dict[str, Any]] = {
         "bots_limit": 10,
         "tokens_limit": None,  # unlimited
         "merge_limit": 5,
+        "multitype_limit": 3,
         "description": "10 ботов, безлимит токенов",
     },
 }

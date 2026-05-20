@@ -112,7 +112,8 @@ CONSENT_TEXT = _build_consent_text()
 
 class IntakeStates(StatesGroup):
     consent = State()
-    ask_type = State()
+    ask_type = State()        # single-type (starter)
+    ask_type_multi = State()  # multi-type toggle (pro/business)
     answering = State()
     clarifying = State()
     ask_bot_token = State()
@@ -163,6 +164,66 @@ def _bot_type_keyboard() -> InlineKeyboardMarkup:
 def _format_question(q: dict, idx: int, total: int) -> str:
     hint = f"\n💡 {q['hint']}" if q.get("hint") else ""
     return f"Вопрос {idx}/{total}\n\n{q['text']}{hint}"
+
+
+def _bot_type_multiselect_keyboard(
+    selected: list[str], limit: int
+) -> InlineKeyboardMarkup:
+    rows = []
+    for key, spec in QUESTIONNAIRES.items():
+        mark = "✅" if key in selected else "⬜"
+        rows.append([InlineKeyboardButton(
+            text=f"{mark} {spec['name']} — {spec['description']}",
+            callback_data=f"btype_m:{key}",
+        )])
+    if selected:
+        n = len(selected)
+        label = _ru_plural(n, ("тип", "типа", "типов"))
+        rows.append([InlineKeyboardButton(
+            text=f"Продолжить ({n} {label}) →",
+            callback_data="btype_m:confirm",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _start_questionnaire(
+    message: Message | None,
+    state: FSMContext,
+    all_types: list[str],
+) -> None:
+    """Kick off the answering FSM for the first type in all_types."""
+    first_type = all_types[0]
+    pending = all_types[1:]
+    spec = QUESTIONNAIRES[first_type]
+    questions = spec["questions"]
+
+    await state.update_data(
+        bot_type=first_type,
+        questionnaire_type=first_type,
+        selected_types=all_types,
+        pending_types=pending,
+        completed_answers={},
+        answers={},
+        current_q=0,
+        total_q=len(questions),
+    )
+    await state.set_state(IntakeStates.answering)
+
+    if message is None:
+        return
+    total = len(all_types)
+    if total > 1:
+        header = (
+            f"━━━━━━━━━━━━━━━━━\n"
+            f"📋 Анкета 1 из {total}: {spec['name']}\n"
+            f"━━━━━━━━━━━━━━━━━\n\n"
+        )
+    else:
+        header = f"Отлично, собираем «{spec['name']}». "
+    await message.answer(
+        f"{header}Задам {len(questions)} вопросов — отвечайте коротко и по делу."
+    )
+    await message.answer(_format_question(questions[0], 1, len(questions)))
 
 
 router = Router()
@@ -329,17 +390,30 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
         )
         return
 
-    await state.set_state(IntakeStates.ask_type)
     # Install the persistent main menu now that the user has consented.
-    # Inline keyboard for bot-type selection coexists with it (different layer).
     await message.answer(
         "Согласие сохранено. Меню всегда доступно внизу экрана.",
         reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
     )
-    await message.answer(
-        "Что именно вам нужно?",
-        reply_markup=_bot_type_keyboard(),
-    )
+
+    sub = await get_active_subscription(client.id)
+    tier = sub.tier if (sub and sub.status == "active") else "starter"
+    multitype_limit: int = PLANS[tier].get("multitype_limit", 1)
+
+    if multitype_limit > 1:
+        await state.set_state(IntakeStates.ask_type_multi)
+        await state.update_data(multitype_limit=multitype_limit, selected_types=[])
+        await message.answer(
+            f"Что именно вам нужно?\n"
+            f"На тарифе {PLANS[tier]['name']} можно объединить до {multitype_limit} типов в одном боте:",
+            reply_markup=_bot_type_multiselect_keyboard([], multitype_limit),
+        )
+    else:
+        await state.set_state(IntakeStates.ask_type)
+        await message.answer(
+            "Что именно вам нужно?",
+            reply_markup=_bot_type_keyboard(),
+        )
 
 
 @router.message(IntakeStates.consent, F.text == "Не согласен")
@@ -357,25 +431,48 @@ async def on_bot_type_chosen(callback: CallbackQuery, state: FSMContext) -> None
     if key not in QUESTIONNAIRES:
         await callback.answer("Неизвестный тип", show_alert=True)
         return
-
-    spec = QUESTIONNAIRES[key]
-    questions = spec["questions"]
-    await state.update_data(
-        bot_type=key,
-        questionnaire_type=key,
-        answers={},
-        current_q=0,
-        total_q=len(questions),
-    )
-    await state.set_state(IntakeStates.answering)
-
     if callback.message is not None:
-        await callback.message.answer(
-            f"Отлично, собираем «{spec['name']}». "
-            f"Задам {len(questions)} вопросов — отвечайте коротко и по делу."
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await _start_questionnaire(callback.message, state, [key])
+    await callback.answer()
+
+
+@router.callback_query(IntakeStates.ask_type_multi, F.data.startswith("btype_m:"))
+async def cb_btype_multi(callback: CallbackQuery, state: FSMContext) -> None:
+    key = (callback.data or "").split(":", 1)[1]
+    data = await state.get_data()
+    selected: list[str] = list(data.get("selected_types") or [])
+    limit: int = data.get("multitype_limit", 2)
+
+    if key == "confirm":
+        if not selected:
+            await callback.answer("Выберите хотя бы один тип", show_alert=True)
+            return
+        if callback.message is not None:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await _start_questionnaire(callback.message, state, selected)
+        await callback.answer()
+        return
+
+    if key not in QUESTIONNAIRES:
+        await callback.answer("Неизвестный тип", show_alert=True)
+        return
+
+    if key in selected:
+        selected.remove(key)
+    elif len(selected) < limit:
+        selected.append(key)
+    else:
+        await callback.answer(
+            f"Максимум {limit} типа на вашем тарифе", show_alert=True
         )
-        first_q = questions[0]
-        await callback.message.answer(_format_question(first_q, 1, len(questions)))
+        return
+
+    await state.update_data(selected_types=selected)
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(
+            reply_markup=_bot_type_multiselect_keyboard(selected, limit)
+        )
     await callback.answer()
 
 
@@ -433,6 +530,45 @@ async def on_answer(message: Message, state: FSMContext) -> None:
         )
         return
 
+    # Save this type's answers and check if more types remain.
+    completed = dict(data.get("completed_answers") or {})
+    completed[bot_type] = answers
+    pending = list(data.get("pending_types") or [])
+
+    if pending:
+        next_type = pending.pop(0)
+        spec_next = QUESTIONNAIRES[next_type]
+        questions_next = spec_next["questions"]
+        selected_types: list[str] = data.get("selected_types") or [bot_type]
+        type_num = len(selected_types) - len(pending)
+        await state.update_data(
+            bot_type=next_type,
+            questionnaire_type=next_type,
+            answers={},
+            current_q=0,
+            total_q=len(questions_next),
+            pending_types=pending,
+            completed_answers=completed,
+        )
+        await message.answer(
+            f"━━━━━━━━━━━━━━━━━\n"
+            f"📋 Анкета {type_num} из {len(selected_types)}: {spec_next['name']}\n"
+            f"━━━━━━━━━━━━━━━━━\n\n"
+            f"Задам {len(questions_next)} вопросов — продолжайте в том же духе."
+        )
+        await message.answer(_format_question(questions_next[0], 1, len(questions_next)))
+        return
+
+    await state.update_data(completed_answers=completed)
+
+    # Multi-type: skip clarification, go directly to token.
+    selected_types = data.get("selected_types") or [bot_type]
+    if len(selected_types) > 1:
+        await state.set_state(IntakeStates.ask_bot_token)
+        await message.answer(ASK_TOKEN_PROMPT)
+        return
+
+    # Single-type: existing clarification flow.
     llm_answers, _ = _redact_sensitive(answers)
     # Import lazily — top-level import would make main.py load agents.analyst
     # before pipeline.py, breaking the existing analyst<->pipeline import dance.
@@ -516,15 +652,39 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
     bot_type = data.get("bot_type")
     raw_answers: dict = data.get("answers") or {}
     clarification_answers: dict = data.get("clarification_answers") or {}
+    selected_types: list[str] = data.get("selected_types") or []
+    completed_answers: dict = data.get("completed_answers") or {}
 
-    llm_answers, sensitive_count = _redact_sensitive(raw_answers)
-
-    pipeline_input = {
-        "bot_type": bot_type,
-        "questionnaire_type": bot_type,
-        "answers": llm_answers,
-        "clarification_answers": clarification_answers,
-    }
+    if len(selected_types) > 1:
+        # Combine answers from all types; prefix question text with type name.
+        combined_raw: dict = {}
+        for type_key in selected_types:
+            type_name = QUESTIONNAIRES[type_key]["name"]
+            for qid, entry in completed_answers.get(type_key, {}).items():
+                combined_raw[f"{type_key}_{qid}"] = {
+                    **entry,
+                    "question": f"[{type_name}] {entry['question']}",
+                }
+        llm_answers, sensitive_count = _redact_sensitive(combined_raw)
+        pipeline_input = {
+            "bot_type": "merged",
+            "questionnaire_type": "merged",
+            "merged_types": selected_types,
+            "answers": llm_answers,
+            "clarification_answers": {},
+        }
+        raw_answers_to_save = combined_raw
+        final_type = "merged"
+    else:
+        llm_answers, sensitive_count = _redact_sensitive(raw_answers)
+        pipeline_input = {
+            "bot_type": bot_type,
+            "questionnaire_type": bot_type,
+            "answers": llm_answers,
+            "clarification_answers": clarification_answers,
+        }
+        raw_answers_to_save = raw_answers
+        final_type = None  # resolved from spec.requirements after pipeline
 
     await state.set_state(IntakeStates.processing)
     await message.answer("Агенты приступили к работе, ожидайте ~60 секунд...")
@@ -567,7 +727,10 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
             await state.clear()
             return
 
-        resolved_type = spec.requirements.get("bot_type", bot_type or "other")
+        resolved_type = final_type or spec.requirements.get("bot_type", bot_type or "other")
+        config_extra = (
+            {"merged_types": selected_types} if len(selected_types) > 1 else {}
+        )
         saved_bot = await save_bot_config(
             client_id=client.id,
             bot_type=resolved_type,
@@ -578,8 +741,9 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
                 "architecture": spec.architecture,
                 # Raw questionnaire answers with unredacted secrets.
                 # Stored only in DB, never passed to LLM.
-                "questionnaire_answers": raw_answers,
+                "questionnaire_answers": raw_answers_to_save,
                 "clarification_answers": clarification_answers,
+                **config_extra,
             },
             bot_token=bot_token,
         )
