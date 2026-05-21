@@ -879,3 +879,84 @@ async def get_client_summary(telegram_id: int) -> dict[str, Any] | None:
             "chat_message_count": int(chat_count or 0),
             "knowledge_chunk_count": int(kb_count or 0),
         }
+
+
+async def get_admin_stats() -> dict[str, Any]:
+    """Aggregate stats for the owner dashboard (/admin_stats)."""
+    async with get_session() as session:
+        now = _utcnow()
+
+        # Active subscriptions grouped by tier and billing cycle
+        subs_result = await session.execute(
+            select(Subscription.tier, Subscription.plan, func.count(Subscription.id))
+            .where(
+                Subscription.status == "active",
+                Subscription.expires_at > now,
+            )
+            .group_by(Subscription.tier, Subscription.plan)
+        )
+        sub_rows = subs_result.all()
+
+        tier_counts: dict[str, int] = {}
+        mrr: float = 0.0
+        total_active = 0
+        for tier, plan, cnt in sub_rows:
+            tier_counts[tier] = tier_counts.get(tier, 0) + cnt
+            total_active += cnt
+            price_key = "price_monthly" if plan == "monthly" else "price_yearly"
+            plan_cfg = PLANS.get(tier, {})
+            monthly_price = (
+                plan_cfg.get("price_monthly", 0)
+                if plan == "monthly"
+                else plan_cfg.get("price_yearly", 0) / 12
+            )
+            mrr += monthly_price * cnt
+
+        # Total bots in the system
+        bot_count = await session.scalar(
+            select(func.count(BotConfig.id)).where(BotConfig.merged_into.is_(None))
+        )
+
+        # Total tokens used + cost across all active subscriptions this period
+        tokens_total = await session.scalar(
+            select(func.coalesce(func.sum(Subscription.tokens_used), 0)).where(
+                Subscription.status == "active",
+                Subscription.expires_at > now,
+            )
+        )
+        cost_total = await session.scalar(
+            select(func.coalesce(func.sum(TokenLog.cost_usd), 0.0))
+        )
+
+        # Top 5 clients by tokens_used in their current subscription
+        top_result = await session.execute(
+            select(Client.telegram_id, Client.username, Subscription.tokens_used)
+            .join(Subscription, Subscription.client_id == Client.id)
+            .where(
+                Subscription.status == "active",
+                Subscription.expires_at > now,
+                Subscription.tokens_used > 0,
+            )
+            .order_by(Subscription.tokens_used.desc())
+            .limit(5)
+        )
+        top_users = [
+            {"telegram_id": r[0], "username": r[1], "tokens_used": r[2]}
+            for r in top_result.all()
+        ]
+
+        # Total registered clients
+        client_count = await session.scalar(
+            select(func.count(Client.id)).where(Client.data_deleted.is_(False))
+        )
+
+        return {
+            "total_active_subs": total_active,
+            "tier_counts": tier_counts,
+            "mrr": round(mrr),
+            "bot_count": int(bot_count or 0),
+            "client_count": int(client_count or 0),
+            "tokens_total": int(tokens_total or 0),
+            "cost_total_usd": float(cost_total or 0.0),
+            "top_users": top_users,
+        }

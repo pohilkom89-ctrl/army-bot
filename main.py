@@ -41,6 +41,7 @@ from db.repository import (
     count_client_bots,
     delete_bot,
     get_active_subscription,
+    get_admin_stats,
     get_bot_by_id,
     get_bot_stats,
     get_chat_history,
@@ -3163,6 +3164,54 @@ async def cmd_delete(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Ваши данные удалены.", reply_markup=ReplyKeyboardRemove()
     )
+
+
+@router.message(Command("admin_stats"))
+async def cmd_admin_stats(message: Message) -> None:
+    user = message.from_user
+    if not is_admin(user.id if user else None):
+        return
+
+    try:
+        stats = await get_admin_stats()
+    except Exception:
+        logger.exception("admin_stats: query failed")
+        await message.answer("Ошибка при получении статистики.")
+        return
+
+    tier_names = {"starter": "Старт", "pro": "Про", "business": "Бизнес"}
+    tier_prices = {"starter": 490, "pro": 949, "business": 2990}
+
+    sub_lines = []
+    for tier in ("starter", "pro", "business"):
+        cnt = stats["tier_counts"].get(tier, 0)
+        if cnt:
+            price = tier_prices[tier]
+            sub_lines.append(f"  {tier_names[tier]}: {cnt} × {price}₽ = {cnt * price:,}₽".replace(",", " "))
+
+    top_lines = []
+    for i, u in enumerate(stats["top_users"], 1):
+        name = f"@{u['username']}" if u["username"] else f"id:{u['telegram_id']}"
+        top_lines.append(f"  {i}. {name} — {u['tokens_used']:,}".replace(",", " "))
+
+    now_msk = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+
+    text = (
+        f"📊 ArmyBots Dashboard\n"
+        f"🕐 {now_msk}\n\n"
+        f"👥 Клиентов: {stats['client_count']}\n"
+        f"🤖 Ботов в системе: {stats['bot_count']}\n\n"
+        f"💰 Подписки: {stats['total_active_subs']} активных\n"
+        + ("\n".join(sub_lines) + "\n" if sub_lines else "  (нет активных)\n")
+        + f"MRR: ~{stats['mrr']:,}₽\n".replace(",", " ")
+        + f"ARR: ~{stats['mrr'] * 12:,}₽\n\n".replace(",", " ")
+        + f"📈 Токены (активные подписки): {stats['tokens_total']:,}\n".replace(",", " ")
+        + f"💵 Расход всего: ${stats['cost_total_usd']:.2f}\n"
+    )
+    if top_lines:
+        text += "\n🏆 Топ по токенам:\n" + "\n".join(top_lines)
+
+    await message.answer(text)
 
 
 BOT_TOKEN = settings.bot_token
