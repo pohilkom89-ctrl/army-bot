@@ -1,0 +1,15 @@
+[Unit]
+Description=ArmyBots Debug Bot
+After=network.target armybots.service
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/home/deploy/army-bot
+ExecStart=/home/deploy/army-bot/.venv/bin/python debug_bot.py
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/deploy/army-bot/.env
+
+[Install]
+WantedBy=multi-user.target

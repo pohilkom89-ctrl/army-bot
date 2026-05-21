@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     support_log_chat_id: int | None = None         # all dialogues mirrored here
     support_escalation_chat_id: int | None = None  # escalations + /reply commands
 
+    # Debug bot (optional — owner-only bot for analyzing and patching bugs)
+    debug_bot_token: str | None = None
+
     class Config:
         env_file = ".env"
         extra = "ignore"
