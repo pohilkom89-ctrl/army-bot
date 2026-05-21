@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Deployment
     repo_url: str = "https://github.com/pohilkom89-ctrl/army-bot.git"
 
+    # Support bot (optional — separate Telegram bot for customer support)
+    support_bot_token: str | None = None
+    support_log_chat_id: int | None = None         # all dialogues mirrored here
+    support_escalation_chat_id: int | None = None  # escalations + /reply commands
+
     class Config:
         env_file = ".env"
         extra = "ignore"
