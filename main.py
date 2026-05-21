@@ -5,7 +5,7 @@ import signal
 from datetime import datetime, timezone
 from io import BytesIO
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -108,6 +108,43 @@ def _build_consent_text() -> str:
 
 
 CONSENT_TEXT = _build_consent_text()
+
+# Commands that work even after consent is revoked (GDPR + re-consent flow).
+_CONSENT_EXEMPT = {"/start", "/revoke_consent", "/delete_my_data", "/my_data", "/help"}
+
+
+class ConsentGateMiddleware(BaseMiddleware):
+    """Block users who have revoked consent from all non-exempt actions."""
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message):
+            user = event.from_user
+            text = event.text or ""
+            if text.startswith("/"):
+                cmd = text.split()[0].split("@")[0]
+                if cmd in _CONSENT_EXEMPT:
+                    return await handler(event, data)
+        elif isinstance(event, CallbackQuery):
+            user = event.from_user
+        else:
+            return await handler(event, data)
+
+        if user is None or is_admin(user.id):
+            return await handler(event, data)
+
+        has_consent = await check_consent(user.id)
+        if not has_consent:
+            notice = (
+                "⚠️ Для использования сервиса необходимо согласие на обработку "
+                "персональных данных.\n\nНажмите /start чтобы дать согласие."
+            )
+            if isinstance(event, Message):
+                await event.answer(notice)
+            elif isinstance(event, CallbackQuery):
+                await event.answer(notice, show_alert=True)
+            return
+
+        return await handler(event, data)
 
 
 class IntakeStates(StatesGroup):
@@ -3044,9 +3081,6 @@ async def cmd_revoke_consent(message: Message, state: FSMContext) -> None:
         return
 
     logger.info("intake: consent revoked tg_id={}", user.id)
-    # TODO: block service access for users with consent_given=False.
-    # Currently consent_given is not checked in command guards — adding that
-    # requires touching every command handler entry-point.
     await state.clear()
     await message.answer(
         "Согласие на обработку персональных данных отозвано.\n\n"
@@ -3136,6 +3170,8 @@ BOT_TOKEN = settings.bot_token
 bot = Bot(token=BOT_TOKEN)
 storage = RedisStorage.from_url(settings.redis_url)
 dp = Dispatcher(storage=storage)
+dp.message.middleware(ConsentGateMiddleware())
+dp.callback_query.middleware(ConsentGateMiddleware())
 dp.include_router(router)
 
 
