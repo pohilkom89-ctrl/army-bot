@@ -85,6 +85,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
   {
     "vk_sources": ["vk.com/...", ...],          // из вопроса про VK группы
     "telegram_sources": ["@channel1", ...],     // из вопроса про TG каналы
+    "analysis_scope": ["posts", "comments", "frequency", "topics"],  // что анализировать
     "keywords": ["слово1", ...],                // из вопроса про ключевые слова
     "niche": "ниша бизнеса",
     "report_frequency": "daily | weekly | on_demand",
@@ -102,6 +103,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "products": [{"name": "...", "price": "..."}],  // из списка «товар — цена»
     "goal": "заявка | консультация | онлайн-продажа",
     "faq": [{"q": "...", "a": "..."}],              // если клиент дал пары
+    "order_routing": "telegram | email | google_sheets | ...",  // как обрабатывать заявки
     "manager_telegram_placeholder": true | false,   // true если клиент указал контакт (сам контакт НЕ пиши!)
     "delivery_and_payment": "...",
     "discounts": "...",
@@ -207,6 +209,7 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
 - Для planner:
   {
     "user_scope": "personal | team | service_clients | broad_audience",  // кто пользуется ботом
+    "primary_tasks": ["todo_list", "habits", "reminders", "time_tracker", "goals"],  // основные режимы бота
     "task_categories": ["work", "personal", "study", ...] | "by_priority" | "custom",
     "reminder_modes": ["before_deadline", "morning_summary", "evening_review", "on_demand"],
     "input_format": "text | voice | template | natural_language",
@@ -240,7 +243,6 @@ ANALYST_SYSTEM_PROMPT = """Ты — бизнес-аналитик фабрики
     "communication_style": "friendly_mentor | strict_teacher | playful_peer",
     "reminders": "daily | scheduled | on_skip | none",
     "teacher_transition": "on_complex | on_request | paid_upgrade_only | none",
-    "teacher_telegram_placeholder": true | false,    // true если клиент дал @ препода (значение НЕ копируй!)
     "methodology_notes": "уникальность подхода, гарантии, типичные кейсы"
   }
 

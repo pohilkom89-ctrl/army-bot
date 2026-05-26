@@ -4,7 +4,7 @@ from typing import Any, Optional
 from loguru import logger
 from sqlalchemy import func, select, update
 
-from config import PLANS
+from config import BUSINESS_SOFT_CAP, PLANS
 from db.database import get_session
 from db.models import (
     BotConfig,
@@ -370,12 +370,8 @@ async def create_subscription(
 
 
 async def count_client_bots(client_id: int) -> int:
-    """Count all BotConfig rows for this client. Used by on_bot_token
-    and the post-consent guard to enforce PLANS[tier]['bots_limit'].
-    `remove_bot` does a hard-delete (drops the row), so paused bots
-    are the only non-active rows left and they correctly count against
-    the limit (a paused bot still owns its container/image and can be
-    resumed without going through intake again)."""
+    """Total BotConfig rows for this client (paused bots included).
+    Merged-away bots (merged_into IS NOT NULL) are excluded."""
     async with get_session() as session:
         result = await session.execute(
             select(func.count())
@@ -383,6 +379,36 @@ async def count_client_bots(client_id: int) -> int:
             .where(
                 BotConfig.client_id == client_id,
                 BotConfig.merged_into.is_(None),
+            )
+        )
+        return int(result.scalar_one() or 0)
+
+
+async def count_simple_bots(client_id: int) -> int:
+    """Count single-type bots (no merged_types key in config_json)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(func.count())
+            .select_from(BotConfig)
+            .where(
+                BotConfig.client_id == client_id,
+                BotConfig.merged_into.is_(None),
+                BotConfig.config_json["merged_types"].is_(None),
+            )
+        )
+        return int(result.scalar_one() or 0)
+
+
+async def count_combo_bots(client_id: int) -> int:
+    """Count multi-type bots (have merged_types key in config_json)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(func.count())
+            .select_from(BotConfig)
+            .where(
+                BotConfig.client_id == client_id,
+                BotConfig.merged_into.is_(None),
+                BotConfig.config_json["merged_types"].isnot(None),
             )
         )
         return int(result.scalar_one() or 0)
@@ -486,9 +512,8 @@ async def get_usage_stats(client_id: int) -> dict[str, Any]:
         tokens_used = sub.tokens_used or 0
         tokens_limit = sub.tokens_limit
         if tokens_limit is None:
-            tokens_left = None
-        else:
-            tokens_left = max(0, tokens_limit - tokens_used)
+            tokens_limit = BUSINESS_SOFT_CAP
+        tokens_left = max(0, tokens_limit - tokens_used)
 
         return {
             "tokens_used": tokens_used,
@@ -510,6 +535,8 @@ async def check_and_update_tokens(client_id: int, tokens_needed: int) -> bool:
         _maybe_reset_tokens(sub, now)
 
         if sub.tokens_limit is None:
+            if (sub.tokens_used or 0) + tokens_needed > BUSINESS_SOFT_CAP:
+                return False
             sub.tokens_used = (sub.tokens_used or 0) + tokens_needed
             return True
 
@@ -760,14 +787,13 @@ async def get_clients_for_limit_alerts() -> list[dict[str, Any]]:
                 Client.data_deleted.is_(False),
                 Subscription.status == "active",
                 Subscription.expires_at > now,
-                Subscription.tokens_limit.is_not(None),
             )
         )
         rows = list(result.all())
 
         for client, sub in rows:
             _maybe_reset_tokens(sub, now)
-            limit = sub.tokens_limit
+            limit = sub.tokens_limit if sub.tokens_limit is not None else BUSINESS_SOFT_CAP
             used = sub.tokens_used or 0
             if limit <= 0:
                 continue

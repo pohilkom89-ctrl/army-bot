@@ -72,48 +72,46 @@ async def test_verify_payment_status_returns_none_without_credentials(monkeypatc
     assert result is None
 
 
-async def test_verify_payment_status_true_on_match(monkeypatch, mocker):
-    monkeypatch.setenv("YUKASSA_SHOP_ID", "test-shop")
-    monkeypatch.setenv("YUKASSA_SECRET_KEY", "test-secret")
+async def test_verify_payment_status_true_on_match(mocker):
+    import billing
+    mocker.patch.object(billing.settings, "yookassa_shop_id", "test-shop")
+    mocker.patch.object(billing.settings, "yookassa_secret_key", "test-secret")
     mocker.patch("billing.check_payment", return_value="succeeded")
 
-    from billing import verify_payment_status
-
-    result = await verify_payment_status("payment-xyz", "succeeded")
+    result = await billing.verify_payment_status("payment-xyz", "succeeded")
     assert result is True
 
 
-async def test_verify_payment_status_false_on_mismatch(monkeypatch, mocker):
+async def test_verify_payment_status_false_on_mismatch(mocker):
     """YooKassa returned a different status than the webhook claimed —
     likely spoofed. Caller should reject with 401."""
-    monkeypatch.setenv("YUKASSA_SHOP_ID", "test-shop")
-    monkeypatch.setenv("YUKASSA_SECRET_KEY", "test-secret")
+    import billing
+    mocker.patch.object(billing.settings, "yookassa_shop_id", "test-shop")
+    mocker.patch.object(billing.settings, "yookassa_secret_key", "test-secret")
     mocker.patch("billing.check_payment", return_value="pending")
 
-    from billing import verify_payment_status
-
-    result = await verify_payment_status("payment-xyz", "succeeded")
+    result = await billing.verify_payment_status("payment-xyz", "succeeded")
     assert result is False
 
 
-async def test_verify_payment_status_none_on_api_error(monkeypatch, mocker):
+async def test_verify_payment_status_none_on_api_error(mocker):
     """YooKassa SDK raised — graceful skip rather than blocking webhook."""
-    monkeypatch.setenv("YUKASSA_SHOP_ID", "test-shop")
-    monkeypatch.setenv("YUKASSA_SECRET_KEY", "test-secret")
+    import billing
+    mocker.patch.object(billing.settings, "yookassa_shop_id", "test-shop")
+    mocker.patch.object(billing.settings, "yookassa_secret_key", "test-secret")
     mocker.patch(
         "billing.check_payment", side_effect=RuntimeError("yookassa down")
     )
 
-    from billing import verify_payment_status
-
-    result = await verify_payment_status("payment-xyz", "succeeded")
+    result = await billing.verify_payment_status("payment-xyz", "succeeded")
     assert result is None
 
 
-async def test_verify_payment_status_none_on_timeout(monkeypatch, mocker):
+async def test_verify_payment_status_none_on_timeout(mocker):
     """5s timeout via asyncio.wait_for — slow YooKassa shouldn't block."""
-    monkeypatch.setenv("YUKASSA_SHOP_ID", "test-shop")
-    monkeypatch.setenv("YUKASSA_SECRET_KEY", "test-secret")
+    import billing
+    mocker.patch.object(billing.settings, "yookassa_shop_id", "test-shop")
+    mocker.patch.object(billing.settings, "yookassa_secret_key", "test-secret")
 
     def _slow(_):
         import time
@@ -124,9 +122,7 @@ async def test_verify_payment_status_none_on_timeout(monkeypatch, mocker):
     # Drop the timeout to keep the test fast
     mocker.patch("billing._VERIFY_TIMEOUT_SECONDS", 0.2)
 
-    from billing import verify_payment_status
-
-    result = await verify_payment_status("payment-xyz", "succeeded")
+    result = await billing.verify_payment_status("payment-xyz", "succeeded")
     assert result is None
 
 

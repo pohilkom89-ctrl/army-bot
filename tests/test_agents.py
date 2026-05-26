@@ -197,7 +197,7 @@ def test_analyst_classifies_hr(mock_run_agent):
     assert result["bot_type"] == "hr"
 
 
-def test_analyst_prompt_enumerates_all_ten_types():
+def test_analyst_prompt_enumerates_all_types():
     """Schema and the system prompt must agree on which bot_types exist —
     if they drift the LLM either invents a value the validator rejects
     (retry burns tokens) or silently misclassifies into a base type.
@@ -216,6 +216,10 @@ def test_analyst_prompt_enumerates_all_ten_types():
         "planner",
         "edu",
         "hr",
+        "quiz",
+        "real_estate",
+        "events",
+        "finance",
     }
     assert schema_types == expected, f"Schema drift: {schema_types ^ expected}"
 

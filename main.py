@@ -24,7 +24,7 @@ from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
 
 from billing import create_payment
-from config import MODELS, MODEL_STRATEGIES, PLANS, is_admin
+from config import BUSINESS_SOFT_CAP, MODELS, MODEL_STRATEGIES, PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from deployer import (
     deploy_bot,
@@ -39,6 +39,8 @@ from db.repository import (
     anonymize_user,
     check_consent,
     count_client_bots,
+    count_combo_bots,
+    count_simple_bots,
     delete_bot,
     get_active_subscription,
     get_admin_stats,
@@ -421,7 +423,7 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
     if not allowed:
         await state.clear()
         await message.answer(
-            f"⚠️ У вас уже {count} ботов из {limit} на тарифе {plan_name}.\n"
+            f"⚠️ Все слоты заняты на тарифе {plan_name} ({count}/{limit} ботов).\n"
             "Создание нового невозможно — удалите существующего "
             "через 🤖 Мои боты или апгрейд тарифа через 💎 Тариф.",
             reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
@@ -743,20 +745,24 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         # parallel session could have created bots, or the client could
         # have used multiple devices to start two intakes at once. Pipeline
         # has already run (tokens spent) — log warning if we have to bail.
-        allowed, plan_name, count, limit = await _check_bots_limit(client.id, user.id)
+        _is_combo = len(selected_types) > 1
+        allowed, plan_name, count, limit = await _check_bots_limit(
+            client.id, user.id, is_combo=_is_combo
+        )
         if not allowed:
+            _kind = "комбо-ботов" if _is_combo else "простых ботов"
             logger.warning(
                 "intake: bots_limit hit AFTER pipeline for client_id={} "
-                "(tokens already spent, count={}/{} on {})",
+                "(tokens already spent, count={}/{} {} on {})",
                 client.id,
                 count,
                 limit,
+                _kind,
                 plan_name,
             )
             await message.answer(
-                f"🚫 Достигнут лимит ботов на вашем тарифе.\n\n"
-                f"Текущий тариф: {plan_name} ({limit})\n"
-                f"Активных ботов: {count}\n\n"
+                f"🚫 Достигнут лимит {_kind} на вашем тарифе.\n\n"
+                f"Текущий тариф: {plan_name} ({_kind}: {count}/{limit})\n\n"
                 "Варианты:\n"
                 "• Удалите ненужного бота через 🤖 Мои боты\n"
                 "• Перейдите на тариф выше → 💎 Тариф",
@@ -987,14 +993,18 @@ async def _render_usage_main(
         f"{reset_line}\n\n"
     )
 
-    # Business = unlimited tokens — skip bar and breakdown percentages.
+    bar, pct_used = _progress_bar_used(used, limit) if limit else ("██████████", 0)
     if limit is None:
         total_line = (
             f"Всего: {_format_num(used)} токенов\n"
             "██████████ ∞ безлимит\n"
         )
+    elif tier == "business":
+        total_line = (
+            f"Всего: {_format_num(used)} / {_format_num(limit)} токенов\n"
+            f"{bar} {pct_used}%  (мягкий лимит, далее — кастомный тариф)\n"
+        )
     else:
-        bar, pct_used = _progress_bar_used(used, limit)
         total_line = (
             f"Всего: {_format_num(used)} / {_format_num(limit)} токенов\n"
             f"{bar} {pct_used}%\n"
@@ -1548,12 +1558,16 @@ def _check_chat_allowed(stats: dict) -> tuple[bool, str | None]:
             "🔒 У вас нет активной подписки. /subscribe для доступа к чату"
         )
     limit = stats.get("tokens_limit")
-    if limit is None:
-        return True, None
     used = stats.get("tokens_used") or 0
-    if used >= limit:
-        return False, "🔒 Токены закончились. /subscribe для продолжения"
-    return True, None
+    if limit is None or used < limit:
+        return True, None
+    if tier == "business":
+        cap_fmt = _format_num(BUSINESS_SOFT_CAP)
+        return False, (
+            f"🔒 Достигнут лимит {cap_fmt} токенов на тарифе Бизнес.\n"
+            "Напишите в поддержку для подключения кастомного тарифа: /help"
+        )
+    return False, "🔒 Токены закончились. /subscribe для продолжения"
 
 
 async def _enter_chat_session(
@@ -2226,24 +2240,40 @@ async def cb_bot_edit_style(callback: CallbackQuery) -> None:
 
 
 async def _check_bots_limit(
-    client_id: int, telegram_id: int
+    client_id: int,
+    telegram_id: int,
+    *,
+    is_combo: bool | None = None,
 ) -> tuple[bool, str, int, int]:
-    """Returns (allowed, plan_name, current_count, bots_limit). Admins
-    bypass the check entirely (returns True with placeholder values).
-    Clients without an active subscription fall back to starter limits.
+    """Returns (allowed, plan_name, current_count, limit).
 
-    Used by both the post-consent guard in on_consent_yes (block before
-    intake starts) and the post-token guard in on_bot_token (block right
-    before save_bot_config). Two checks because the wait between consent
-    and token submission can be minutes — a slot freed by parallel
-    delete shouldn't be the difference between blocking and allowing."""
+    is_combo=None  — general pre-intake check: True if any slot (simple
+                     or combo) is still available. count/limit are totals.
+    is_combo=False — specific check for a single-type bot.
+    is_combo=True  — specific check for a multi-type (combo) bot.
+
+    Admins bypass the check entirely. Clients without an active
+    subscription fall back to starter limits."""
     if is_admin(telegram_id):
         return True, "Безлимит (админ)", 0, 0
     sub = await get_active_subscription(client_id)
     tier = sub.tier if sub else "starter"
     plan = PLANS[tier]
-    limit = plan["bots_limit"]
-    count = await count_client_bots(client_id)
+
+    if is_combo is None:
+        simple_limit = plan["simple_bots_limit"]
+        combo_limit = plan["combo_bots_limit"]
+        simple_count = await count_simple_bots(client_id)
+        combo_count = await count_combo_bots(client_id)
+        allowed = simple_count < simple_limit or combo_count < combo_limit
+        return allowed, plan["name"], simple_count + combo_count, simple_limit + combo_limit
+
+    if is_combo:
+        limit = plan["combo_bots_limit"]
+        count = await count_combo_bots(client_id)
+    else:
+        limit = plan["simple_bots_limit"]
+        count = await count_simple_bots(client_id)
     return count < limit, plan["name"], count, limit
 
 
@@ -2634,6 +2664,8 @@ def _format_tokens_footer(stats: dict) -> str:
     left = max(0, limit - used)
     left_fmt = _format_num(left)
     if left == 0:
+        if tier == "business":
+            return "\n\n🔒 Лимит 50М токенов исчерпан. /help для кастомного тарифа"
         return "\n\n🔒 Токены закончились. /subscribe для продолжения"
     frac = left / limit if limit > 0 else 0.0
     if frac < CRITICAL_TOKENS_THRESHOLD:

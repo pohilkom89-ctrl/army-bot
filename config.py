@@ -37,33 +37,42 @@ PLANS: dict[str, dict[str, Any]] = {
         "name": "Старт",
         "price_monthly": 490,
         "price_yearly": 4700,
-        "bots_limit": 1,
+        "simple_bots_limit": 1,
+        "combo_bots_limit": 0,
         "tokens_limit": 1_000_000,
         "merge_limit": 0,
         "multitype_limit": 1,
-        "description": "1 бот, 1М токенов/мес",
+        "description": "1 простой бот, 1М токенов/мес",
     },
     "pro": {
         "name": "Про",
         "price_monthly": 949,
         "price_yearly": 9500,
-        "bots_limit": 3,
+        "simple_bots_limit": 2,
+        "combo_bots_limit": 2,
         "tokens_limit": 5_000_000,
         "merge_limit": 2,
         "multitype_limit": 2,
-        "description": "3 бота, 5М токенов/мес",
+        "description": "2 простых + 2 комбо-бота, 5М токенов/мес",
     },
     "business": {
         "name": "Бизнес",
         "price_monthly": 2990,
         "price_yearly": 28700,
-        "bots_limit": 10,
+        "simple_bots_limit": 5,
+        "combo_bots_limit": 3,
         "tokens_limit": None,  # unlimited
         "merge_limit": 5,
         "multitype_limit": 3,
-        "description": "10 ботов, безлимит токенов",
+        "description": "5 простых + 3 комбо-бота, безлимит токенов",
     },
 }
+
+# Soft token cap for Business tier (tokens/month). At this threshold new
+# bot queries are blocked and the owner is prompted to switch to a custom plan.
+# Business subscriptions still carry tokens_limit=NULL in the DB; this constant
+# is applied at runtime so existing rows need no migration.
+BUSINESS_SOFT_CAP: int = 50_000_000
 
 CYCLES: tuple[str, ...] = ("monthly", "yearly")
 
