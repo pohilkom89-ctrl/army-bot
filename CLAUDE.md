@@ -103,5 +103,5 @@
 2. ~~Добавить команду `/my_data`~~ — ✅ done
 3. ~~Добавить согласие с офертой при первой оплате~~ — ✅ done (PaymentStates.confirm_offer)
 4. ~~Расширить `is_sensitive_question` для проверки hint~~ — ✅ done
-5. Оценить правомерность передачи chat-history в OpenRouter (США) и отразить в политике ПДн
+5. ~~Отразить передачу chat-history в OpenRouter в согласии~~ — ✅ done (CONSENT_TEXT явно называет OpenRouter США + историю диалогов + предупреждение о ПДн третьих лиц); правовую оценку трансграничной передачи провести с юристом
 6. ~~Реализовать блокировку сервиса после /revoke_consent~~ — ✅ done (ConsentGateMiddleware)
