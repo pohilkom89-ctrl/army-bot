@@ -7,7 +7,7 @@ from aiohttp import web
 from loguru import logger
 
 from billing import handle_webhook, verify_payment_status
-from db.repository import get_bot_by_id_any, log_tokens
+from db.repository import get_bot_by_id_any, log_tokens, upsert_subscriber
 from monitoring.health import register_health_routes
 
 # YooKassa delivers webhooks from this fixed set of networks. List
@@ -149,10 +149,33 @@ async def log_tokens_endpoint(request: web.Request) -> web.Response:
     return web.Response(status=200, text="ok")
 
 
+async def track_subscriber_endpoint(request: web.Request) -> web.Response:
+    expected = os.getenv("INTERNAL_API_KEY", "")
+    if not expected:
+        return web.Response(status=503, text="not configured")
+    provided = request.headers.get("X-Internal-Key", "")
+    if not secrets.compare_digest(provided, expected):
+        logger.warning("track_subscriber: bad key from {}", request.remote)
+        return web.Response(status=401, text="unauthorized")
+    try:
+        data = await request.json()
+        bot_id = int(data["bot_id"])
+        telegram_id = int(data["telegram_id"])
+    except (KeyError, ValueError, TypeError) as e:
+        return web.Response(status=400, text=f"invalid payload: {e}")
+    try:
+        await upsert_subscriber(bot_id=bot_id, telegram_id=telegram_id)
+    except Exception:
+        logger.exception("track_subscriber: failed bot_id={}", bot_id)
+        return web.Response(status=500, text="error")
+    return web.Response(status=200, text="ok")
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/webhook/yukassa", yukassa_webhook)
     app.router.add_post("/internal/log_tokens", log_tokens_endpoint)
+    app.router.add_post("/internal/track_subscriber", track_subscriber_endpoint)
     register_health_routes(app)
     return app
 

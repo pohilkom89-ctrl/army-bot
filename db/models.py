@@ -11,6 +11,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import declarative_base, relationship
@@ -185,6 +186,24 @@ class ChatHistory(Base):
     tokens_used = Column(Integer, nullable=False, default=0)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class BotSubscriber(Base):
+    __tablename__ = "bot_subscribers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bot_id = Column(
+        Integer,
+        ForeignKey("bot_configs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    telegram_id = Column(BigInteger, nullable=False)
+    joined_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("bot_id", "telegram_id", name="uq_bot_subscriber"),
+    )
 
 
 class TokenLog(Base):

@@ -8,6 +8,7 @@ from config import BUSINESS_SOFT_CAP, PLANS
 from db.database import get_session
 from db.models import (
     BotConfig,
+    BotSubscriber,
     ChatHistory,
     Client,
     ConsentLog,
@@ -235,6 +236,54 @@ async def set_bot_status(
         return True
 
 
+async def rename_bot(bot_id: int, client_id: int, new_name: str) -> bool:
+    """Update BotConfig.bot_name. Returns False if the bot is not owned by
+    this client."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        bot.bot_name = new_name
+        return True
+
+
+async def upsert_subscriber(bot_id: int, telegram_id: int) -> None:
+    """Record that telegram_id has interacted with bot_id. Silently ignores
+    duplicates — checks existence before inserting to stay dialect-neutral."""
+    async with get_session() as session:
+        existing = await session.scalar(
+            select(BotSubscriber.id).where(
+                BotSubscriber.bot_id == bot_id,
+                BotSubscriber.telegram_id == telegram_id,
+            )
+        )
+        if existing is None:
+            session.add(BotSubscriber(bot_id=bot_id, telegram_id=telegram_id))
+
+
+async def get_subscriber_ids(bot_id: int) -> list[int]:
+    """Return all telegram_ids subscribed to bot_id."""
+    async with get_session() as session:
+        rows = await session.execute(
+            select(BotSubscriber.telegram_id).where(BotSubscriber.bot_id == bot_id)
+        )
+        return [r for (r,) in rows.all()]
+
+
+async def count_subscribers(bot_id: int) -> int:
+    """Return subscriber count for bot_id."""
+    async with get_session() as session:
+        return int(await session.scalar(
+            select(func.count(BotSubscriber.id)).where(BotSubscriber.bot_id == bot_id)
+        ) or 0)
+
+
 async def delete_bot(bot_id: int, client_id: int) -> bool:
     """Hard-delete BotConfig. ChatHistory and KnowledgeChunk are removed
     via FK CASCADE; TokenLog rows SET NULL on bot_id (kept for billing).
@@ -334,6 +383,86 @@ async def get_bot_stats(
             "last_activity": last_activity,
             "kb_chunks": int(kb_chunks or 0),
             "kb_sources": int(kb_sources or 0),
+        }
+
+
+async def get_bot_analytics(
+    bot_id: int, client_id: int
+) -> dict[str, Any] | None:
+    """Conversation analytics for the bot detail card.
+
+    Returns None if the bot is not owned by this client. Fields:
+    - unique_users: distinct client_ids who sent at least one message
+    - total_messages: all user messages
+    - messages_7d: user messages in the last 7 days
+    - messages_30d: user messages in the last 30 days
+    - peak_hour: hour of day (0–23 UTC) with most messages, or None
+    - avg_messages_per_user: mean messages per unique user
+    """
+    async with get_session() as session:
+        bot_result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if bot_result.scalar_one_or_none() is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        user_filter = [
+            ChatHistory.bot_id == bot_id,
+            ChatHistory.role == "user",
+        ]
+
+        unique_users = await session.scalar(
+            select(func.count(func.distinct(ChatHistory.client_id))).where(*user_filter)
+        )
+
+        total_messages = await session.scalar(
+            select(func.count(ChatHistory.id)).where(*user_filter)
+        )
+
+        messages_7d = await session.scalar(
+            select(func.count(ChatHistory.id)).where(
+                *user_filter,
+                ChatHistory.created_at >= now - timedelta(days=7),
+            )
+        )
+
+        messages_30d = await session.scalar(
+            select(func.count(ChatHistory.id)).where(
+                *user_filter,
+                ChatHistory.created_at >= now - timedelta(days=30),
+            )
+        )
+
+        # Peak hour: group by hour of day, pick the busiest.
+        # func.extract works on both PostgreSQL and SQLite.
+        peak_row = await session.execute(
+            select(
+                func.extract("hour", ChatHistory.created_at).label("hr"),
+                func.count(ChatHistory.id).label("cnt"),
+            )
+            .where(*user_filter)
+            .group_by(func.extract("hour", ChatHistory.created_at))
+            .order_by(func.count(ChatHistory.id).desc())
+            .limit(1)
+        )
+        peak = peak_row.first()
+        peak_hour = int(peak.hr) if peak else None
+
+        total = int(total_messages or 0)
+        uniq = int(unique_users or 0)
+        avg_per_user = round(total / uniq, 1) if uniq else 0.0
+
+        return {
+            "unique_users": uniq,
+            "total_messages": total,
+            "messages_7d": int(messages_7d or 0),
+            "messages_30d": int(messages_30d or 0),
+            "peak_hour": peak_hour,
+            "avg_messages_per_user": avg_per_user,
         }
 
 

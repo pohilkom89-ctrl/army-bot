@@ -44,6 +44,7 @@ from db.repository import (
     delete_bot,
     get_active_subscription,
     get_admin_stats,
+    get_bot_analytics,
     get_bot_by_id,
     get_bot_stats,
     get_chat_history,
@@ -64,6 +65,9 @@ from db.repository import (
     save_consent,
     set_bot_status,
     set_limit_alerts,
+    count_subscribers,
+    get_subscriber_ids,
+    rename_bot,
     update_bot_config,
     update_bot_system_prompt,
 )
@@ -177,6 +181,7 @@ class EditStates(StatesGroup):
     waiting_forbidden = State()
     waiting_scripts = State()
     waiting_greeting = State()
+    waiting_rename = State()
 
 
 class PaymentStates(StatesGroup):
@@ -186,6 +191,11 @@ class PaymentStates(StatesGroup):
 class MergeStates(StatesGroup):
     selecting = State()
     naming = State()
+
+
+class BroadcastStates(StatesGroup):
+    confirm = State()
+    sending = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -1918,6 +1928,16 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="📊 Аналитика",
+                    callback_data=f"bot:analytics:{bot.id}",
+                ),
+                InlineKeyboardButton(
+                    text="📢 Рассылка",
+                    callback_data=f"bot:broadcast:{bot.id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     text="🗑 Удалить",
                     callback_data=f"bot:delete:{bot.id}",
                 ),
@@ -1999,6 +2019,127 @@ async def cb_bot_list(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:analytics:"))
+async def cb_bot_analytics(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:analytics:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    analytics = await get_bot_analytics(bot_id, client_id)
+    if bot_cfg is None or analytics is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    peak = analytics["peak_hour"]
+    peak_str = f"{peak:02d}:00–{(peak+1)%24:02d}:00 UTC" if peak is not None else "нет данных"
+
+    text = (
+        f"📊 Аналитика — {bot_cfg.bot_name}\n\n"
+        f"👥 Уникальных пользователей: {_format_num(analytics['unique_users'])}\n"
+        f"💬 Всего сообщений: {_format_num(analytics['total_messages'])}\n"
+        f"   • За 7 дней: {_format_num(analytics['messages_7d'])}\n"
+        f"   • За 30 дней: {_format_num(analytics['messages_30d'])}\n"
+        f"📈 Среднее сообщений/юзер: {analytics['avg_messages_per_user']}\n"
+        f"⏰ Пиковый час активности: {peak_str}"
+    )
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")
+    ]])
+    if callback.message is not None:
+        await callback.message.answer(text, reply_markup=back_kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:broadcast:"))
+async def cb_bot_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:broadcast:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    sub_count = await count_subscribers(bot_id)
+    if sub_count == 0:
+        if callback.message is not None:
+            await callback.message.answer(
+                "📢 У этого бота пока нет подписчиков.\n"
+                "Подписчики добавляются автоматически когда пользователи пишут боту."
+            )
+        await callback.answer()
+        return
+    await state.set_state(BroadcastStates.confirm)
+    await state.update_data(broadcast_bot_id=bot_id, broadcast_bot_token=bot_cfg.bot_token)
+    if callback.message is not None:
+        await callback.message.answer(
+            f"📢 Рассылка для бота «{bot_cfg.bot_name}»\n"
+            f"Подписчиков: {_format_num(sub_count)}\n\n"
+            "Пришлите текст сообщения для рассылки.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast:cancel")
+async def cb_broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer("Рассылка отменена")
+    if callback.message is not None:
+        await callback.message.answer("Рассылка отменена. /mybots")
+
+
+@router.message(BroadcastStates.confirm)
+async def on_broadcast_text(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст. Пришлите сообщение для рассылки.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("broadcast_bot_id")
+    bot_token = data.get("broadcast_bot_token")
+    if not bot_id or not bot_token:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+
+    subscriber_ids = await get_subscriber_ids(bot_id)
+    if not subscriber_ids:
+        await state.clear()
+        await message.answer("Подписчиков не найдено. Рассылка отменена.")
+        return
+
+    await state.set_state(BroadcastStates.sending)
+    await message.answer(f"⏳ Отправляю {_format_num(len(subscriber_ids))} подписчикам…")
+
+    broadcast_bot = Bot(token=bot_token)
+    sent = 0
+    failed = 0
+    # Telegram rate limit: 30 messages/sec; use ~25 to stay safe
+    BATCH = 25
+    try:
+        for i, tg_id in enumerate(subscriber_ids):
+            try:
+                await broadcast_bot.send_message(tg_id, text)
+                sent += 1
+            except Exception:
+                failed += 1
+            if (i + 1) % BATCH == 0:
+                await asyncio.sleep(1)
+    finally:
+        await broadcast_bot.session.close()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Рассылка завершена.\n"
+        f"• Доставлено: {_format_num(sent)}\n"
+        f"• Ошибок (бот заблокирован/не найден): {_format_num(failed)}"
+    )
 
 
 @router.callback_query(F.data.startswith("bot:pause:"))
@@ -2103,6 +2244,12 @@ def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="💬 Приветствие",
                     callback_data=f"bot:edit_greeting:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏷 Переименовать",
+                    callback_data=f"bot:edit_name:{bot_id}",
                 )
             ],
             [
@@ -2507,6 +2654,51 @@ async def on_edit_greeting(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer("💬 Приветствие сохранено. /mybots")
+
+
+@router.callback_query(F.data.startswith("bot:edit_name:"))
+async def cb_bot_edit_name(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_name:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите новое имя бота одним сообщением (не более 64 символов)."
+        )
+    await state.set_state(EditStates.waiting_rename)
+    await state.update_data(edit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(EditStates.waiting_rename)
+async def on_edit_rename(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустое имя. Пришлите название бота.")
+        return
+    if len(text) > 64:
+        await message.answer("Имя слишком длинное (макс. 64 символа). Попробуйте ещё раз.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("edit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await rename_bot(bot_id, client.id, text)
+    if not ok:
+        await state.clear()
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    await state.clear()
+    await message.answer(f"🏷 Бот переименован в «{text}». /mybots")
 
 
 @router.callback_query(F.data.startswith("bot:delete:"))
