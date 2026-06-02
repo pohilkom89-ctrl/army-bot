@@ -34,11 +34,15 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * никакого print
   * при старте — logger.info о запуске бота
 - Учёт токенов: ПОСЛЕ каждого вызова `client.chat.completions.create(...)`
-  * импортируй `from usage_reporter import report_usage` (модуль уже лежит в /app, ничего создавать не нужно)
+  * импортируй `from usage_reporter import report_usage, report_subscriber` (модуль уже лежит в /app, ничего создавать не нужно)
   * сразу после получения response: `asyncio.create_task(report_usage(response.usage, model_used))`
   * вызов fire-and-forget — НЕ await, не блокирует ответ пользователю
   * `model_used` — та же строка что передана в `model=...`, обычно `OPENROUTER_MODEL_BOTS`
   * НЕ пиши свою функцию для этого, НЕ импортируй ничего другого, НЕ делай try/except — usage_reporter сам обрабатывает все сбои
+- Учёт подписчиков: в КАЖДОМ хендлере входящего сообщения от пользователя (message handler)
+  * добавь одну строку до LLM-вызова: `asyncio.create_task(report_subscriber(message.from_user.id))`
+  * import уже включён в строку выше (report_subscriber из usage_reporter)
+  * вызов fire-and-forget — НЕ await, не блокирует ответ; все сбои usage_reporter обрабатывает сам
 - Каждый хендлер оборачивай в try/except, ошибки логируй через logger.exception(...)
 - Идентификаторы и комментарии — на английском языке
 - Точка входа:

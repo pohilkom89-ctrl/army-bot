@@ -365,3 +365,14 @@ def test_builder_template_requires_usage_reporter():
     assert "usage_reporter" in BUILDER_SYSTEM_PROMPT
     assert "report_usage" in BUILDER_SYSTEM_PROMPT
     assert "create_task" in BUILDER_SYSTEM_PROMPT  # fire-and-forget pattern
+
+
+def test_builder_template_requires_subscriber_tracking():
+    """Broadcasting requires generated bots to call report_subscriber on every
+    incoming message so the factory knows the subscriber list. If this
+    instruction is missing from the builder prompt, subscriber lists stay empty
+    and /broadcast sends 0 messages."""
+    from agents.builder import BUILDER_SYSTEM_PROMPT
+
+    assert "report_subscriber" in BUILDER_SYSTEM_PROMPT
+    assert "message.from_user.id" in BUILDER_SYSTEM_PROMPT
