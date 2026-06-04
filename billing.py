@@ -8,7 +8,11 @@ from loguru import logger
 from yookassa import Configuration, Payment
 
 from config import CYCLES, PLANS
-from db.repository import create_subscription, find_subscription_by_payment_id
+from db.repository import (
+    apply_pending_referral_reward,
+    create_subscription,
+    find_subscription_by_payment_id,
+)
 from settings import settings
 
 # How long we're willing to wait for YooKassa's API to confirm a payment
@@ -196,3 +200,6 @@ async def handle_webhook(data: dict[str, Any]) -> None:
         cycle,
         expires_at.isoformat(),
     )
+    reward_applied = await apply_pending_referral_reward(client_id)
+    if reward_applied:
+        logger.info("billing: referral reward applied for client_id={}", client_id)

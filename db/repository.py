@@ -739,6 +739,156 @@ async def activate_trial(client_id: int) -> bool:
         return True
 
 
+import secrets
+import string as _string
+
+_REFERRAL_ALPHABET = _string.ascii_lowercase + _string.digits
+
+
+def _gen_referral_code() -> str:
+    return "".join(secrets.choice(_REFERRAL_ALPHABET) for _ in range(10))
+
+
+async def get_or_create_referral_code(client_id: int) -> str:
+    """Return existing referral code or generate a new one (lazy)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client.referral_code).where(Client.id == client_id)
+        )
+        code = result.scalar_one_or_none()
+        if code:
+            return code
+        # Generate unique code with collision retry
+        for _ in range(5):
+            candidate = _gen_referral_code()
+            exists = await session.scalar(
+                select(func.count()).select_from(Client).where(
+                    Client.referral_code == candidate
+                )
+            )
+            if not exists:
+                await session.execute(
+                    update(Client)
+                    .where(Client.id == client_id)
+                    .values(referral_code=candidate)
+                )
+                return candidate
+        raise RuntimeError("referral: failed to generate unique code")
+
+
+async def find_client_by_referral_code(code: str) -> Client | None:
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client).where(Client.referral_code == code)
+        )
+        client = result.scalar_one_or_none()
+        if client is not None:
+            session.expunge(client)
+        return client
+
+
+async def set_referred_by(client_id: int, referrer_id: int) -> bool:
+    """Link client to referrer. Idempotent — only sets once, returns False if
+    already referred or self-referral attempted."""
+    if client_id == referrer_id:
+        return False
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client.referred_by_id).where(Client.id == client_id)
+        )
+        current = result.scalar_one_or_none()
+        if current is not None:
+            return False
+        await session.execute(
+            update(Client)
+            .where(Client.id == client_id)
+            .values(referred_by_id=referrer_id)
+        )
+        return True
+
+
+async def get_referral_stats(client_id: int) -> dict:
+    """Return counts of referrals and rewards for the given client."""
+    async with get_session() as session:
+        total = await session.scalar(
+            select(func.count()).select_from(Client).where(
+                Client.referred_by_id == client_id
+            )
+        )
+        rewarded = await session.scalar(
+            select(func.count()).select_from(Client).where(
+                Client.referred_by_id == client_id,
+                Client.referral_reward_sent.is_(True),
+            )
+        )
+        return {
+            "total_referrals": int(total or 0),
+            "rewards_earned": int(rewarded or 0),
+            "pending_rewards": int(total or 0) - int(rewarded or 0),
+        }
+
+
+async def apply_pending_referral_reward(referee_client_id: int) -> bool:
+    """Called after a payment completes. If this client was referred and the
+    reward hasn't been sent yet, extend the referrer's subscription by
+    REFERRAL_REWARD_DAYS and mark reward as sent.
+
+    Returns True if a reward was applied.
+    """
+    from config import REFERRAL_REWARD_DAYS
+
+    now = _utcnow()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client.referred_by_id, Client.referral_reward_sent).where(
+                Client.id == referee_client_id
+            )
+        )
+        row = result.one_or_none()
+        if row is None:
+            return False
+        referrer_id, reward_sent = row
+        if referrer_id is None or reward_sent:
+            return False
+
+        # Extend referrer's active subscription or create a reward subscription
+        sub = await _active_subscription(session, referrer_id, now)
+        if sub is not None:
+            new_expires = sub.expires_at + timedelta(days=REFERRAL_REWARD_DAYS)
+            sub.expires_at = new_expires
+            logger.info(
+                "referral: extended sub_id={} referrer={} by {} days → {}",
+                sub.id, referrer_id, REFERRAL_REWARD_DAYS, new_expires.isoformat(),
+            )
+        else:
+            expires_at = now + timedelta(days=REFERRAL_REWARD_DAYS)
+            session.add(
+                Subscription(
+                    client_id=referrer_id,
+                    yukassa_payment_id=None,
+                    status="active",
+                    plan="referral_reward",
+                    tier="pro",
+                    tokens_limit=PLANS["pro"]["tokens_limit"],
+                    tokens_used=0,
+                    tokens_reset_at=expires_at,
+                    started_at=now,
+                    expires_at=expires_at,
+                )
+            )
+            logger.info(
+                "referral: created reward sub referrer={} {} days",
+                referrer_id, REFERRAL_REWARD_DAYS,
+            )
+
+        await session.execute(
+            update(Client)
+            .where(Client.id == referee_client_id)
+            .values(referral_reward_sent=True)
+        )
+        return True
+
+
 async def check_and_update_tokens(client_id: int, tokens_needed: int) -> bool:
     async with get_session() as session:
         now = _utcnow()

@@ -43,6 +43,11 @@ class Client(Base):
     # Daily token-limit alerts. Default ON; flipped via /limit_alerts.
     limit_alerts_enabled = Column(Boolean, nullable=False, default=True)
 
+    # Referral program
+    referral_code = Column(String(16), unique=True, nullable=True, index=True)
+    referred_by_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)
+    referral_reward_sent = Column(Boolean, nullable=False, default=False)
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     bots = relationship(

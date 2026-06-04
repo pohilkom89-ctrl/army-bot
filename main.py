@@ -74,6 +74,10 @@ from db.repository import (
     update_bot_system_prompt,
     activate_trial,
     clone_bot_config,
+    get_or_create_referral_code,
+    find_client_by_referral_code,
+    set_referred_by,
+    get_referral_stats,
 )
 from pipeline import (
     _token_accumulator,
@@ -414,7 +418,20 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
     logger.info("intake: /start from tg_id={}", user.id)
     await state.clear()
-    await get_or_create_client(user.id, user.username)
+    client = await get_or_create_client(user.id, user.username)
+
+    # Deep-link referral: /start ref_<code>
+    args = message.text.split(maxsplit=1)[1] if message.text and " " in message.text else ""
+    if args.startswith("ref_"):
+        ref_code = args[4:]
+        referrer = await find_client_by_referral_code(ref_code)
+        if referrer is not None and referrer.id != client.id:
+            linked = await set_referred_by(client.id, referrer.id)
+            if linked:
+                logger.info(
+                    "referral: tg_id={} referred by client_id={}", user.id, referrer.id
+                )
+
     await state.set_state(IntakeStates.consent)
     await message.answer(CONSENT_TEXT, reply_markup=_consent_keyboard())
 
@@ -3729,6 +3746,35 @@ async def cmd_my_data(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("referral"))
+async def cmd_referral(message: Message) -> None:
+    user = message.from_user
+    if user is None:
+        return
+
+    client = await get_or_create_client(user.id, user.username)
+    code = await get_or_create_referral_code(client.id)
+    stats = await get_referral_stats(client.id)
+
+    bot_username = _BOT_USERNAME or "ArmyBotsBot"
+    link = f"https://t.me/{bot_username}?start=ref_{code}"
+
+    lines = [
+        "🤝 Реферальная программа",
+        "",
+        "Приглашайте друзей — получайте +30 дней Про за каждого, кто оформит подписку.",
+        "",
+        f"Ваша ссылка:\n{link}",
+        "",
+        f"Приглашено друзей: {stats['total_referrals']}",
+        f"Наград получено: {stats['rewards_earned']}",
+    ]
+    if stats["pending_rewards"]:
+        lines.append(f"Ожидает оплаты (друзья ещё не купили): {stats['pending_rewards']}")
+
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("delete_my_data"))
 async def cmd_delete(message: Message, state: FSMContext) -> None:
     user = message.from_user
@@ -3801,6 +3847,7 @@ async def cmd_admin_stats(message: Message) -> None:
 
 
 BOT_TOKEN = settings.bot_token
+_BOT_USERNAME: str | None = None
 
 bot = Bot(token=BOT_TOKEN)
 storage = RedisStorage.from_url(settings.redis_url)
@@ -3829,7 +3876,11 @@ async def main():
 
     await init_db()
     logger.info("База данных инициализирована")
-    logger.info("Бот запущен")
+
+    global _BOT_USERNAME
+    bot_info = await bot.get_me()
+    _BOT_USERNAME = bot_info.username
+    logger.info("Бот запущен: @{}", _BOT_USERNAME)
 
     scheduler = start_alerts_scheduler(bot)
     attach_health_monitor(scheduler, bot)

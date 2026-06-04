@@ -80,6 +80,10 @@ CYCLES: tuple[str, ...] = ("monthly", "yearly")
 # single-use per client (tracked via Subscription.plan == "trial").
 TRIAL_DAYS: int = 7
 
+# Referral reward: days added to the referrer's subscription when a referred
+# user makes their first paid subscription purchase.
+REFERRAL_REWARD_DAYS: int = 30
+
 
 # Multi-LLM routing — model tiers used by run_bot_query and agents/router.py.
 # Keys are the tier names stored in BotConfig.config_json["model_strategy"]
