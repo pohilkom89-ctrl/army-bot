@@ -79,6 +79,18 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
     return bot_dir
 
 
+def clone_bot_files(source_bot_id: int, new_bot_id: int) -> Path:
+    """Copy main.py from source bot to a new bot directory.
+    Used by the clone flow — avoids re-running the full pipeline."""
+    source_main = _bot_dir(source_bot_id) / "main.py"
+    if not source_main.exists():
+        raise FileNotFoundError(
+            f"deployer: source bot {source_bot_id} has no main.py — cannot clone"
+        )
+    bot_code = source_main.read_text(encoding="utf-8")
+    return prepare_bot_files(bot_code, new_bot_id)
+
+
 def _write_dockerfile(bot_id: int) -> Path:
     bot_dir = _bot_dir(bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)

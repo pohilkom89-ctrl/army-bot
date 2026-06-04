@@ -27,6 +27,7 @@ from billing import create_payment
 from config import BUSINESS_SOFT_CAP, MODELS, MODEL_STRATEGIES, PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from deployer import (
+    clone_bot_files,
     deploy_bot,
     redeploy_bot,
     get_bot_logs,
@@ -71,6 +72,7 @@ from db.repository import (
     update_bot_config,
     update_bot_system_prompt,
     activate_trial,
+    clone_bot_config,
 )
 from pipeline import (
     _token_accumulator,
@@ -197,6 +199,10 @@ class MergeStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     confirm = State()
     sending = State()
+
+
+class CloneStates(StatesGroup):
+    waiting_token = State()
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -1967,9 +1973,15 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🔁 Клонировать",
+                    callback_data=f"bot:clone:{bot.id}",
+                ),
+                InlineKeyboardButton(
                     text="🗑 Удалить",
                     callback_data=f"bot:delete:{bot.id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="◀️ Назад",
                     callback_data="bot:list",
@@ -2728,6 +2740,127 @@ async def on_edit_rename(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(f"🏷 Бот переименован в «{text}». /mybots")
+
+
+@router.callback_query(F.data.startswith("bot:clone:"))
+async def cb_bot_clone(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None or callback.message is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный идентификатор", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    _is_combo = bool((bot_cfg.config_json or {}).get("merged_types"))
+    allowed, plan_name, count, limit = await _check_bots_limit(
+        client.id, user.id, is_combo=_is_combo
+    )
+    if not allowed:
+        _kind = "комбо-ботов" if _is_combo else "простых ботов"
+        await callback.answer(
+            f"Лимит {_kind} на тарифе {plan_name} ({count}/{limit}).\n"
+            "Удалите бота или обновите тариф → /subscribe",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(CloneStates.waiting_token)
+    await state.update_data(clone_source_bot_id=bot_id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Отмена", callback_data="clone:cancel")
+        ]]
+    )
+    await callback.message.answer(
+        f"🔁 Клонирование бота <b>{bot_cfg.bot_name}</b>\n\n"
+        "Клон получит те же настройки, промпт и тип.\n"
+        "Нужен отдельный токен от @BotFather — один токен нельзя использовать дважды.\n\n"
+        "Отправьте токен нового бота:",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "clone:cancel")
+async def cb_clone_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.answer("Клонирование отменено.")
+    await callback.answer()
+
+
+@router.message(CloneStates.waiting_token)
+async def on_clone_token(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    new_token = (message.text or "").strip()
+    try:
+        validate_token(new_token)
+    except TokenValidationError:
+        await message.answer(
+            "Это не похоже на токен бота. Проверьте формат и отправьте ещё раз."
+        )
+        return
+
+    data = await state.get_data()
+    source_bot_id = data.get("clone_source_bot_id")
+    if source_bot_id is None:
+        await message.answer("Сессия устарела. Начните клонирование заново.")
+        await state.clear()
+        return
+
+    client = await get_or_create_client(user.id, user.username)
+    await message.answer("Клонирую бота, подождите...")
+    try:
+        clone = await clone_bot_config(source_bot_id, client.id, new_token)
+    except ValueError:
+        await message.answer("Исходный бот не найден. Попробуйте ещё раз.")
+        await state.clear()
+        return
+
+    try:
+        await asyncio.to_thread(clone_bot_files, source_bot_id, clone.id)
+    except FileNotFoundError:
+        await message.answer(
+            "⚠️ Файлы исходного бота не найдены на диске.\n"
+            "Возможно, бот был создан давно. Попробуйте пересоздать его."
+        )
+        await state.clear()
+        return
+
+    deploy_ok = False
+    try:
+        await deploy_bot(clone.id)
+        deploy_ok = True
+    except Exception:
+        logger.exception("clone: deploy_bot failed for clone_id={}", clone.id)
+
+    await state.clear()
+    if deploy_ok:
+        await message.answer(
+            f"✅ Клон создан и запущен!\n\n"
+            f"🤖 {clone.bot_name}\n"
+            "Управление → /mybots"
+        )
+    else:
+        await message.answer(
+            f"⚠️ Клон создан, но контейнер не поднялся.\n"
+            f"🤖 {clone.bot_name}\n"
+            "Проверьте токен и попробуйте перезапустить через /mybots"
+        )
+    logger.info(
+        "clone: ok source={} clone={} client_id={}", source_bot_id, clone.id, client.id
+    )
 
 
 @router.callback_query(F.data.startswith("bot:delete:"))

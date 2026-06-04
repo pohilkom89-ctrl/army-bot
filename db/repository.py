@@ -125,6 +125,47 @@ async def save_bot_config(
         return bot
 
 
+async def clone_bot_config(
+    source_bot_id: int,
+    owner_client_id: int,
+    new_token: str,
+) -> BotConfig:
+    """Duplicate a BotConfig owned by owner_client_id.
+
+    Copies bot_type, system_prompt, config_json from source. The new bot
+    gets the same name with ' (копия)' appended, a new token, and a fresh
+    DB row. Raises ValueError if source bot is not found or not owned by
+    owner_client_id.
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == source_bot_id,
+                BotConfig.client_id == owner_client_id,
+            )
+        )
+        source = result.scalar_one_or_none()
+        if source is None:
+            raise ValueError(
+                f"clone_bot_config: bot {source_bot_id} not found "
+                f"for client {owner_client_id}"
+            )
+        clone = BotConfig(
+            client_id=owner_client_id,
+            bot_name=f"{source.bot_name} (копия)",
+            bot_type=source.bot_type,
+            bot_token=new_token,
+            system_prompt=source.system_prompt,
+            config_json=dict(source.config_json or {}),
+            is_active=True,
+            status="active",
+        )
+        session.add(clone)
+        await session.flush()
+        session.expunge(clone)
+        return clone
+
+
 async def get_client_bots(client_id: int) -> list[BotConfig]:
     async with get_session() as session:
         result = await session.execute(
