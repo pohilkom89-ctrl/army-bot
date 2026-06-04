@@ -4,7 +4,7 @@ from typing import Any, Optional
 from loguru import logger
 from sqlalchemy import func, select, update
 
-from config import BUSINESS_SOFT_CAP, PLANS
+from config import BUSINESS_SOFT_CAP, PLANS, TRIAL_DAYS
 from db.database import get_session
 from db.models import (
     BotConfig,
@@ -564,7 +564,11 @@ def _maybe_reset_tokens(sub: Subscription, now: datetime) -> None:
     """Zero tokens_used and advance reset_at if the period has elapsed."""
     if sub.tokens_reset_at is None:
         return
-    if sub.tokens_reset_at <= now:
+    # SQLite returns naive datetimes; PostgreSQL returns aware. Normalise.
+    reset_at = sub.tokens_reset_at
+    if reset_at.tzinfo is None:
+        reset_at = reset_at.replace(tzinfo=timezone.utc)
+    if reset_at <= now:
         sub.tokens_used = 0
         sub.tokens_reset_at = now + TOKEN_RESET_PERIOD
 
@@ -651,7 +655,47 @@ async def get_usage_stats(client_id: int) -> dict[str, Any]:
             "cost_usd_total": cost_usd_total,
             "reset_at": sub.tokens_reset_at,
             "tier": sub.tier,
+            "plan": sub.plan,
         }
+
+
+async def activate_trial(client_id: int) -> bool:
+    """Provision a 7-day Pro trial for a new user.
+
+    Returns True if the trial was created, False if the client already used
+    a trial or already holds an active subscription.
+    """
+    now = _utcnow()
+    async with get_session() as session:
+        had_trial = await session.scalar(
+            select(func.count()).select_from(Subscription).where(
+                Subscription.client_id == client_id,
+                Subscription.plan == "trial",
+            )
+        )
+        if had_trial:
+            return False
+
+        active_sub = await _active_subscription(session, client_id, now)
+        if active_sub is not None:
+            return False
+
+        expires_at = now + timedelta(days=TRIAL_DAYS)
+        session.add(
+            Subscription(
+                client_id=client_id,
+                yukassa_payment_id=None,
+                status="active",
+                plan="trial",
+                tier="pro",
+                tokens_limit=PLANS["pro"]["tokens_limit"],
+                tokens_used=0,
+                tokens_reset_at=expires_at,
+                started_at=now,
+                expires_at=expires_at,
+            )
+        )
+        return True
 
 
 async def check_and_update_tokens(client_id: int, tokens_needed: int) -> bool:

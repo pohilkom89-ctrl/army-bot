@@ -76,6 +76,10 @@ BUSINESS_SOFT_CAP: int = 50_000_000
 
 CYCLES: tuple[str, ...] = ("monthly", "yearly")
 
+# Free trial duration for new users. Trial = Pro tier, no payment required,
+# single-use per client (tracked via Subscription.plan == "trial").
+TRIAL_DAYS: int = 7
+
 
 # Multi-LLM routing — model tiers used by run_bot_query and agents/router.py.
 # Keys are the tier names stored in BotConfig.config_json["model_strategy"]

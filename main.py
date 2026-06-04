@@ -70,6 +70,7 @@ from db.repository import (
     rename_bot,
     update_bot_config,
     update_bot_system_prompt,
+    activate_trial,
 )
 from pipeline import (
     _token_accumulator,
@@ -429,6 +430,14 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
     # questionnaire. Slot may free up later via /mybots delete — they
     # can re-enter intake then.
     client = await get_or_create_client(user.id, user.username)
+
+    trial_activated = await activate_trial(client.id)
+    if trial_activated:
+        await message.answer(
+            "🎁 Вам активирован пробный период 7 дней на тарифе Про — бесплатно!\n"
+            "Все функции доступны без ограничений. Подписку можно оформить в /subscribe."
+        )
+
     allowed, plan_name, count, limit = await _check_bots_limit(client.id, user.id)
     if not allowed:
         await state.clear()
@@ -843,7 +852,8 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
             ],
             [
                 InlineKeyboardButton(
-                    text="🤖 Управление", callback_data="post_create:mybots"
+                    text="🤖 Карточка бота",
+                    callback_data=f"post_create:mybots:{saved_bot.id}",
                 )
             ],
         ]
@@ -988,14 +998,26 @@ async def _render_usage_main(
             "Оформите подписку → /subscribe"
         ), _upgrade_keyboard()
 
+    plan = stats.get("plan")
     tier_label = PLANS[tier]["name"] if tier in PLANS else tier
     reset_short = _format_ru_date_short(reset_at) if reset_at else "—"
     days_to_reset = _days_until(reset_at)
-    reset_line = (
-        f"Сброс: через {days_to_reset} "
-        f"{_ru_plural(days_to_reset, ('день', 'дня', 'дней'))} "
-        f"({reset_short})"
-    )
+
+    if plan == "trial":
+        tier_label = (
+            f"🎁 Пробный период — {tier_label} "
+            f"(осталось {days_to_reset} "
+            f"{_ru_plural(days_to_reset, ('день', 'дня', 'дней'))})"
+        )
+        reset_line = f"Истекает: {reset_short}"
+        if days_to_reset <= 1:
+            reset_line = f"⚠️ Истекает сегодня! {reset_short} → /subscribe"
+    else:
+        reset_line = (
+            f"Сброс: через {days_to_reset} "
+            f"{_ru_plural(days_to_reset, ('день', 'дня', 'дней'))} "
+            f"({reset_short})"
+        )
 
     header = (
         "📊 Использование за текущий период\n\n"
@@ -1649,12 +1671,19 @@ async def cb_post_create_chat(
     await callback.answer()
 
 
-@router.callback_query(F.data == "post_create:mybots")
+@router.callback_query(F.data.startswith("post_create:mybots:"))
 async def cb_post_create_mybots(callback: CallbackQuery) -> None:
-    if callback.message is not None:
-        await callback.message.answer(
-            "Управление ботами: /mybots"
-        )
+    user = callback.from_user
+    if user is None or callback.message is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    await _answer_bot_detail(callback, client.id, bot_id)
     await callback.answer()
 
 
