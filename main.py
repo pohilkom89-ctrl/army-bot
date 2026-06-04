@@ -26,6 +26,7 @@ from loguru import logger
 from billing import create_payment
 from config import BUSINESS_SOFT_CAP, MODELS, MODEL_STRATEGIES, PLANS, is_admin
 from db.database import get_session, init_db  # noqa: F401
+from bot_templates import STANDARD_BOT_CODE, TEMPLATES, get_template
 from deployer import (
     clone_bot_files,
     deploy_bot,
@@ -205,6 +206,11 @@ class CloneStates(StatesGroup):
     waiting_token = State()
 
 
+class TemplateStates(StatesGroup):
+    choosing = State()
+    waiting_token = State()
+
+
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [
@@ -312,7 +318,8 @@ _MAIN_MENU_BUTTONS: tuple[tuple[tuple[str, str], ...], ...] = (
     (("💬 Чат с ботом", "/chat"), ("🤖 Мои боты", "/mybots")),
     (("📊 Статистика", "/usage"), ("📚 Обучение", "/teach")),
     (("⚙️ Настройки", "/settings"), ("💎 Тариф", "/subscribe")),
-    (("➕ Создать бота", "/start"), ("❓ Помощь", "/help")),
+    (("➕ Создать бота", "/start"), ("📋 Шаблоны", "/templates")),
+    (("❓ Помощь", "/help"),),
 )
 _MAIN_MENU_ADMIN_LABEL = "💎 Безлимит (админ)"
 _MAIN_MENU_LABELS_ALL: set[str] = {
@@ -1414,6 +1421,198 @@ async def cmd_subscribe(message: Message) -> None:
     )
 
 
+def _templates_list_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{t['emoji']} {t['name']} — {t['description']}",
+                callback_data=f"tpl:preview:{key}",
+            )
+        ]
+        for key, t in TEMPLATES.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("templates"))
+async def cmd_templates(message: Message, state: FSMContext) -> None:
+    if not await _require_consent(message):
+        return
+    await state.set_state(TemplateStates.choosing)
+    await message.answer(
+        "📋 <b>Шаблоны ботов</b>\n\n"
+        "Готовые боты — никакого пайплайна, запуск за ~10 секунд.\n"
+        "Промпт можно отредактировать через /mybots после создания.\n\n"
+        "Выберите шаблон:",
+        parse_mode="HTML",
+        reply_markup=_templates_list_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("tpl:preview:"), TemplateStates.choosing)
+async def cb_template_preview(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    key = (callback.data or "").split(":")[2]
+    tmpl = get_template(key)
+    if tmpl is None:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Выбрать этот шаблон",
+                    callback_data=f"tpl:choose:{key}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ К списку",
+                    callback_data="tpl:list",
+                )
+            ],
+        ]
+    )
+    await callback.message.answer(tmpl["preview"], reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tpl:list")
+async def cb_template_list(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    await state.set_state(TemplateStates.choosing)
+    await callback.message.answer(
+        "Выберите шаблон:", reply_markup=_templates_list_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tpl:choose:"))
+async def cb_template_choose(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None or callback.message is None:
+        await callback.answer()
+        return
+    key = (callback.data or "").split(":")[2]
+    tmpl = get_template(key)
+    if tmpl is None:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+
+    client = await get_or_create_client(user.id, user.username)
+    allowed, plan_name, count, limit = await _check_bots_limit(client.id, user.id)
+    if not allowed:
+        await callback.answer(
+            f"Лимит ботов на тарифе {plan_name} ({count}/{limit}).\n"
+            "Удалите бота или оформите подписку → /subscribe",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(TemplateStates.waiting_token)
+    await state.update_data(template_key=key)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Отмена", callback_data="tpl:cancel")
+        ]]
+    )
+    await callback.message.answer(
+        f"Отлично! Шаблон <b>{tmpl['emoji']} {tmpl['name']}</b> выбран.\n\n"
+        "Создайте бота через @BotFather и отправьте его токен:",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tpl:cancel")
+async def cb_template_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.answer("Создание по шаблону отменено.")
+    await callback.answer()
+
+
+@router.message(TemplateStates.waiting_token)
+async def on_template_token(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    new_token = (message.text or "").strip()
+    try:
+        validate_token(new_token)
+    except TokenValidationError:
+        await message.answer(
+            "Это не похоже на токен бота. Проверьте формат и отправьте ещё раз."
+        )
+        return
+
+    data = await state.get_data()
+    key = data.get("template_key")
+    tmpl = get_template(key) if key else None
+    if tmpl is None:
+        await message.answer("Сессия устарела. Начните заново → /templates")
+        await state.clear()
+        return
+
+    client = await get_or_create_client(user.id, user.username)
+    await message.answer(f"Создаю {tmpl['emoji']} {tmpl['name']}...")
+
+    try:
+        bot_cfg = await save_bot_config(
+            client_id=client.id,
+            bot_name=f"{tmpl['emoji']} {tmpl['name']}",
+            bot_type=tmpl["bot_type"],
+            system_prompt=tmpl["system_prompt"],
+            config={"model_strategy": "auto", "template_key": key},
+            bot_token=new_token,
+        )
+    except Exception:
+        logger.exception("templates: save_bot_config failed tg_id={}", user.id)
+        await message.answer("Не удалось создать бота. Попробуйте ещё раз.")
+        await state.clear()
+        return
+
+    try:
+        await asyncio.to_thread(prepare_bot_files, STANDARD_BOT_CODE, bot_cfg.id)
+    except Exception:
+        logger.exception("templates: prepare_bot_files failed bot_id={}", bot_cfg.id)
+        await message.answer("Ошибка при подготовке файлов. Попробуйте ещё раз.")
+        await state.clear()
+        return
+
+    deploy_ok = False
+    try:
+        await deploy_bot(bot_cfg.id)
+        deploy_ok = True
+    except Exception:
+        logger.exception("templates: deploy_bot failed bot_id={}", bot_cfg.id)
+
+    await state.clear()
+    if deploy_ok:
+        await message.answer(
+            f"✅ {tmpl['emoji']} <b>{tmpl['name']}</b> создан и запущен!\n\n"
+            "Управление → /mybots\n"
+            "Промпт можно настроить: /mybots → Редактировать → ✏️ Промпт",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"⚠️ Бот создан, но контейнер не поднялся.\n"
+            f"{tmpl['emoji']} {tmpl['name']}\n"
+            "Проверьте токен в /mybots → перезапуск."
+        )
+    logger.info(
+        "templates: created bot_id={} template={} client_id={}",
+        bot_cfg.id, key, client.id,
+    )
+
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     """Show the command index. Doubles as the entry-point for
@@ -1434,6 +1633,7 @@ async def cmd_help(message: Message) -> None:
         "⚙️ /settings — настройки бота",
         "💎 /subscribe — выбор тарифа",
         "➕ /start — создать нового бота",
+        "📋 /templates — готовые шаблоны ботов (быстрый старт)",
         "",
         "🔒 /my_data — ваши данные в системе",
         "🗑 /delete_my_data — удалить все данные",
