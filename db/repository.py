@@ -13,6 +13,7 @@ from db.models import (
     Client,
     ConsentLog,
     KnowledgeChunk,
+    ScheduledBroadcast,
     Subscription,
     TokenLog,
 )
@@ -1350,3 +1351,85 @@ async def get_admin_stats() -> dict[str, Any]:
             "cost_total_usd": float(cost_total or 0.0),
             "top_users": top_users,
         }
+
+
+# ---------------------------------------------------------------------------
+# Scheduled broadcasts
+# ---------------------------------------------------------------------------
+
+async def create_scheduled_broadcast(
+    bot_id: int, client_id: int, message_text: str, send_at: datetime
+) -> ScheduledBroadcast:
+    async with get_session() as session:
+        row = ScheduledBroadcast(
+            bot_id=bot_id,
+            client_id=client_id,
+            message_text=message_text,
+            send_at=send_at,
+            status="pending",
+        )
+        session.add(row)
+        await session.flush()
+        session.expunge(row)
+        return row
+
+
+async def get_pending_broadcasts(before: datetime) -> list[ScheduledBroadcast]:
+    """Return all pending broadcasts whose send_at <= before."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(ScheduledBroadcast).where(
+                ScheduledBroadcast.status == "pending",
+                ScheduledBroadcast.send_at <= before,
+            )
+        )
+        rows = list(result.scalars().all())
+        for r in rows:
+            session.expunge(r)
+        return rows
+
+
+async def mark_broadcast_sent(
+    broadcast_id: int, sent_count: int, failed_count: int
+) -> None:
+    async with get_session() as session:
+        await session.execute(
+            update(ScheduledBroadcast)
+            .where(ScheduledBroadcast.id == broadcast_id)
+            .values(status="sent", sent_count=sent_count, failed_count=failed_count)
+        )
+
+
+async def get_bot_scheduled_broadcasts(
+    bot_id: int, client_id: int
+) -> list[ScheduledBroadcast]:
+    """Return pending broadcasts for a bot owned by client_id."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(ScheduledBroadcast).where(
+                ScheduledBroadcast.bot_id == bot_id,
+                ScheduledBroadcast.client_id == client_id,
+                ScheduledBroadcast.status == "pending",
+            ).order_by(ScheduledBroadcast.send_at)
+        )
+        rows = list(result.scalars().all())
+        for r in rows:
+            session.expunge(r)
+        return rows
+
+
+async def cancel_scheduled_broadcast(broadcast_id: int, client_id: int) -> bool:
+    """Delete a pending broadcast if it belongs to client_id. Returns True if deleted."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(ScheduledBroadcast).where(
+                ScheduledBroadcast.id == broadcast_id,
+                ScheduledBroadcast.client_id == client_id,
+                ScheduledBroadcast.status == "pending",
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        await session.delete(row)
+        return True

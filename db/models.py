@@ -211,6 +211,33 @@ class BotSubscriber(Base):
     )
 
 
+class ScheduledBroadcast(Base):
+    __tablename__ = "scheduled_broadcasts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bot_id = Column(
+        Integer,
+        ForeignKey("bot_configs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    message_text = Column(Text, nullable=False)
+    send_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    # pending | sent | failed
+    status = Column(String(16), nullable=False, default="pending")
+    sent_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class TokenLog(Base):
     __tablename__ = "token_logs"
 

@@ -1,8 +1,9 @@
 import asyncio
 import html
 import os
+import re
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -78,6 +79,9 @@ from db.repository import (
     find_client_by_referral_code,
     set_referred_by,
     get_referral_stats,
+    create_scheduled_broadcast,
+    get_bot_scheduled_broadcasts,
+    cancel_scheduled_broadcast,
 )
 from pipeline import (
     _token_accumulator,
@@ -88,6 +92,7 @@ from pipeline import (
 )
 from monitoring.alerts import attach_health_monitor
 from services.alerts import start_alerts_scheduler
+from services.broadcasts import attach_broadcasts_scheduler
 from services.image_generation import image_generator
 from services.rag import (
     add_knowledge,
@@ -213,6 +218,42 @@ class CloneStates(StatesGroup):
 class TemplateStates(StatesGroup):
     choosing = State()
     waiting_token = State()
+
+
+class ScheduledBroadcastStates(StatesGroup):
+    waiting_text = State()
+    waiting_time = State()
+
+
+# Moscow UTC+3 — used for parsing user-supplied schedule times.
+_MOSCOW_TZ = timezone(timedelta(hours=3))
+
+
+def _parse_schedule_time(text: str) -> datetime | None:
+    """Parse schedule time from user input. Returns UTC datetime or None."""
+    text = text.strip()
+    # DD.MM.YYYY HH:MM
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})$", text)
+    if m:
+        day, month, year, hour, minute = (int(x) for x in m.groups())
+        try:
+            dt = datetime(year, month, day, hour, minute, tzinfo=_MOSCOW_TZ)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            return None
+    # DD.MM HH:MM — current or next year
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{2})$", text)
+    if m:
+        day, month, hour, minute = (int(x) for x in m.groups())
+        now_msk = datetime.now(_MOSCOW_TZ)
+        try:
+            dt = datetime(now_msk.year, month, day, hour, minute, tzinfo=_MOSCOW_TZ)
+            if dt <= now_msk:
+                dt = dt.replace(year=now_msk.year + 1)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 
 def _bot_type_keyboard() -> InlineKeyboardMarkup:
@@ -2190,9 +2231,15 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="📅 Расписание",
+                    callback_data=f"bot:schedule:{bot.id}",
+                ),
+                InlineKeyboardButton(
                     text="🔁 Клонировать",
                     callback_data=f"bot:clone:{bot.id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="🗑 Удалить",
                     callback_data=f"bot:delete:{bot.id}",
@@ -2397,6 +2444,176 @@ async def on_broadcast_text(message: Message, state: FSMContext) -> None:
         f"✅ Рассылка завершена.\n"
         f"• Доставлено: {_format_num(sent)}\n"
         f"• Ошибок (бот заблокирован/не найден): {_format_num(failed)}"
+    )
+
+
+def _schedule_list_keyboard(bot_id: int, broadcasts: list) -> InlineKeyboardMarkup:
+    rows = []
+    for b in broadcasts:
+        send_msk = b.send_at.astimezone(_MOSCOW_TZ)
+        label = f"🕐 {send_msk.strftime('%d.%m %H:%M')} — {b.message_text[:30]}{'…' if len(b.message_text) > 30 else ''}"
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=f"sched:noop:{b.id}"),
+            InlineKeyboardButton(text="❌", callback_data=f"sched:cancel:{b.id}:{bot_id}"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="➕ Запланировать рассылку", callback_data=f"sched:new:{bot_id}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:detail:{bot_id}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("bot:schedule:"))
+async def cb_bot_schedule(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    resolved = await _resolve_edit_target(callback, "bot:schedule:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    broadcasts = await get_bot_scheduled_broadcasts(bot_id, client_id)
+    text = f"📅 Отложенные рассылки для «{bot_cfg.bot_name}»\n"
+    if broadcasts:
+        text += f"Запланировано: {len(broadcasts)}"
+    else:
+        text += "Нет запланированных рассылок."
+    if callback.message is not None:
+        await callback.message.answer(text, reply_markup=_schedule_list_keyboard(bot_id, broadcasts))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sched:cancel:"))
+async def cb_schedule_cancel_item(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    client = await get_or_create_client(user.id, user.username)
+    parts = (callback.data or "").split(":")
+    try:
+        broadcast_id = int(parts[2])
+        bot_id = int(parts[3])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+    deleted = await cancel_scheduled_broadcast(broadcast_id, client.id)
+    if not deleted:
+        await callback.answer("Рассылка не найдена или уже отправлена", show_alert=True)
+        return
+    await callback.answer("Рассылка отменена")
+    broadcasts = await get_bot_scheduled_broadcasts(bot_id, client.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    bot_name = bot_cfg.bot_name if bot_cfg else "бот"
+    text = f"📅 Отложенные рассылки для «{bot_name}»\n"
+    text += f"Запланировано: {len(broadcasts)}" if broadcasts else "Нет запланированных рассылок."
+    if callback.message is not None:
+        await callback.message.edit_text(text, reply_markup=_schedule_list_keyboard(bot_id, broadcasts))
+
+
+@router.callback_query(F.data.startswith("sched:noop:"))
+async def cb_schedule_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sched:new:"))
+async def cb_schedule_new(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    sub_count = await count_subscribers(bot_id)
+    if sub_count == 0:
+        await callback.answer("У бота нет подписчиков", show_alert=True)
+        return
+    await state.set_state(ScheduledBroadcastStates.waiting_text)
+    await state.update_data(sched_bot_id=bot_id, sched_client_id=client.id)
+    if callback.message is not None:
+        await callback.message.answer(
+            f"📝 Введите текст рассылки для бота «{bot_cfg.bot_name}» ({_format_num(sub_count)} подписчиков):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="sched:cancel_flow"),
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sched:cancel_flow")
+async def cb_schedule_cancel_flow(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer("Отменено")
+    if callback.message is not None:
+        await callback.message.answer("Создание рассылки отменено. /mybots")
+
+
+@router.message(ScheduledBroadcastStates.waiting_text)
+async def on_schedule_text(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст. Введите сообщение для рассылки.")
+        return
+    await state.update_data(sched_text=text)
+    await state.set_state(ScheduledBroadcastStates.waiting_time)
+    await message.answer(
+        "🕐 Когда отправить? Введите дату и время по Москве (UTC+3):\n\n"
+        "Форматы:\n"
+        "• <code>25.06 18:30</code> — 25 июня, 18:30 Мск\n"
+        "• <code>25.06.2026 18:30</code> — полная дата",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="sched:cancel_flow"),
+        ]]),
+    )
+
+
+@router.message(ScheduledBroadcastStates.waiting_time)
+async def on_schedule_time(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    send_at_utc = _parse_schedule_time(raw)
+    if send_at_utc is None:
+        await message.answer(
+            "Не удалось распознать время. Используйте формат <code>ДД.ММ ЧЧ:ММ</code> или <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>.",
+            parse_mode="HTML",
+        )
+        return
+    if send_at_utc <= datetime.now(timezone.utc):
+        await message.answer("Это время уже прошло. Укажите время в будущем.")
+        return
+
+    data = await state.get_data()
+    bot_id = data.get("sched_bot_id")
+    client_id = data.get("sched_client_id")
+    sched_text = data.get("sched_text", "")
+    if not bot_id or not client_id:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+
+    await create_scheduled_broadcast(bot_id, client_id, sched_text, send_at_utc)
+    await state.clear()
+
+    send_msk = send_at_utc.astimezone(_MOSCOW_TZ)
+    await message.answer(
+        f"✅ Рассылка запланирована на <b>{send_msk.strftime('%d.%m.%Y %H:%M')} Мск</b>.\n"
+        f"Управление: 📅 Расписание на карточке бота.",
+        parse_mode="HTML",
     )
 
 
@@ -3883,6 +4100,7 @@ async def main():
     logger.info("Бот запущен: @{}", _BOT_USERNAME)
 
     scheduler = start_alerts_scheduler(bot)
+    attach_broadcasts_scheduler(scheduler, bot)
     attach_health_monitor(scheduler, bot)
 
     polling_task = asyncio.create_task(
