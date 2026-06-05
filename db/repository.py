@@ -1354,6 +1354,53 @@ async def get_admin_stats() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Subscriber stats
+# ---------------------------------------------------------------------------
+
+async def get_subscriber_stats(bot_id: int, client_id: int) -> dict | None:
+    """Return subscriber growth stats for a bot owned by client_id.
+
+    Returns None if the bot is not owned by this client. Fields:
+    - total: all-time subscriber count
+    - new_today: joined since midnight UTC today
+    - new_7d: joined in the last 7 days
+    - new_30d: joined in the last 30 days
+    """
+    async with get_session() as session:
+        bot_result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if bot_result.scalar_one_or_none() is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        base = select(func.count(BotSubscriber.id)).where(BotSubscriber.bot_id == bot_id)
+
+        total = await session.scalar(base)
+        new_today = await session.scalar(
+            base.where(BotSubscriber.joined_at >= today_start)
+        )
+        new_7d = await session.scalar(
+            base.where(BotSubscriber.joined_at >= now - timedelta(days=7))
+        )
+        new_30d = await session.scalar(
+            base.where(BotSubscriber.joined_at >= now - timedelta(days=30))
+        )
+
+        return {
+            "total": int(total or 0),
+            "new_today": int(new_today or 0),
+            "new_7d": int(new_7d or 0),
+            "new_30d": int(new_30d or 0),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Scheduled broadcasts
 # ---------------------------------------------------------------------------
 

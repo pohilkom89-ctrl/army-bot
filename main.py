@@ -83,6 +83,7 @@ from db.repository import (
     create_scheduled_broadcast,
     get_bot_scheduled_broadcasts,
     cancel_scheduled_broadcast,
+    get_subscriber_stats,
 )
 from pipeline import (
     _token_accumulator,
@@ -2335,7 +2336,10 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
         return
     bot_id, client_id = resolved
     bot_cfg = await get_bot_by_id(bot_id, client_id)
-    analytics = await get_bot_analytics(bot_id, client_id)
+    analytics, sub_stats = await asyncio.gather(
+        get_bot_analytics(bot_id, client_id),
+        get_subscriber_stats(bot_id, client_id),
+    )
     if bot_cfg is None or analytics is None:
         await callback.answer("Бот не найден", show_alert=True)
         return
@@ -2343,14 +2347,26 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
     peak = analytics["peak_hour"]
     peak_str = f"{peak:02d}:00–{(peak+1)%24:02d}:00 UTC" if peak is not None else "нет данных"
 
+    sub_section = ""
+    if sub_stats:
+        sub_section = (
+            f"\n📣 Подписчики\n"
+            f"   Всего: {_format_num(sub_stats['total'])}\n"
+            f"   Сегодня: +{_format_num(sub_stats['new_today'])}\n"
+            f"   За 7 дней: +{_format_num(sub_stats['new_7d'])}\n"
+            f"   За 30 дней: +{_format_num(sub_stats['new_30d'])}\n"
+        )
+
     text = (
-        f"📊 Аналитика — {bot_cfg.bot_name}\n\n"
-        f"👥 Уникальных пользователей: {_format_num(analytics['unique_users'])}\n"
-        f"💬 Всего сообщений: {_format_num(analytics['total_messages'])}\n"
-        f"   • За 7 дней: {_format_num(analytics['messages_7d'])}\n"
-        f"   • За 30 дней: {_format_num(analytics['messages_30d'])}\n"
-        f"📈 Среднее сообщений/юзер: {analytics['avg_messages_per_user']}\n"
-        f"⏰ Пиковый час активности: {peak_str}"
+        f"📊 Аналитика — {bot_cfg.bot_name}\n"
+        f"{sub_section}\n"
+        f"💬 Диалоги\n"
+        f"   Уникальных пользователей: {_format_num(analytics['unique_users'])}\n"
+        f"   Всего сообщений: {_format_num(analytics['total_messages'])}\n"
+        f"   За 7 дней: {_format_num(analytics['messages_7d'])}\n"
+        f"   За 30 дней: {_format_num(analytics['messages_30d'])}\n"
+        f"   Среднее/юзер: {analytics['avg_messages_per_user']}\n"
+        f"⏰ Пиковый час: {peak_str}"
     )
     back_kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")
