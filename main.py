@@ -4279,7 +4279,7 @@ async def main():
         dp.start_polling(bot), name="polling"
     )
     webhook_task = asyncio.create_task(
-        start_webhook_server(), name="webhook"
+        start_webhook_server(bot), name="webhook"
     )
     shutdown_task = asyncio.create_task(
         shutdown_event.wait(), name="shutdown"

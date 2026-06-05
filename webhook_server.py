@@ -7,7 +7,13 @@ from aiohttp import web
 from loguru import logger
 
 from billing import handle_webhook, verify_payment_status
-from db.repository import get_bot_by_id_any, log_tokens, upsert_subscriber
+from aiogram import Bot
+from db.repository import (
+    get_bot_by_id_any,
+    get_bot_owner_telegram_id,
+    log_tokens,
+    upsert_subscriber,
+)
 from monitoring.health import register_health_routes
 
 # YooKassa delivers webhooks from this fixed set of networks. List
@@ -164,15 +170,43 @@ async def track_subscriber_endpoint(request: web.Request) -> web.Response:
     except (KeyError, ValueError, TypeError) as e:
         return web.Response(status=400, text=f"invalid payload: {e}")
     try:
-        await upsert_subscriber(bot_id=bot_id, telegram_id=telegram_id)
+        is_new = await upsert_subscriber(bot_id=bot_id, telegram_id=telegram_id)
     except Exception:
         logger.exception("track_subscriber: failed bot_id={}", bot_id)
         return web.Response(status=500, text="error")
+
+    if is_new:
+        asyncio.create_task(
+            _notify_owner_new_subscriber(request.app["bot"], bot_id, telegram_id)
+        )
     return web.Response(status=200, text="ok")
 
 
-def build_app() -> web.Application:
+async def _notify_owner_new_subscriber(
+    bot: Bot, bot_id: int, subscriber_telegram_id: int
+) -> None:
+    """Send a notification to the bot owner when a new subscriber arrives."""
+    try:
+        owner_telegram_id = await get_bot_owner_telegram_id(bot_id)
+        if owner_telegram_id is None:
+            return
+        bot_cfg = await get_bot_by_id_any(bot_id)
+        bot_name = bot_cfg.bot_name if bot_cfg else f"#{bot_id}"
+        await bot.send_message(
+            owner_telegram_id,
+            f"🔔 Новый подписчик в боте <b>{bot_name}</b>!\n"
+            f"Telegram ID: <code>{subscriber_telegram_id}</code>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception(
+            "notify_owner: failed bot_id={} subscriber={}", bot_id, subscriber_telegram_id
+        )
+
+
+def build_app(bot: Bot) -> web.Application:
     app = web.Application()
+    app["bot"] = bot
     app.router.add_post("/webhook/yukassa", yukassa_webhook)
     app.router.add_post("/internal/log_tokens", log_tokens_endpoint)
     app.router.add_post("/internal/track_subscriber", track_subscriber_endpoint)
@@ -180,9 +214,9 @@ def build_app() -> web.Application:
     return app
 
 
-async def start_webhook_server() -> None:
+async def start_webhook_server(bot: Bot) -> None:
     port = int(os.getenv("WEBHOOK_PORT", "8080"))
-    app = build_app()
+    app = build_app(bot)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)

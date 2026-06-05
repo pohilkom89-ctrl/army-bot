@@ -295,9 +295,9 @@ async def rename_bot(bot_id: int, client_id: int, new_name: str) -> bool:
         return True
 
 
-async def upsert_subscriber(bot_id: int, telegram_id: int) -> None:
-    """Record that telegram_id has interacted with bot_id. Silently ignores
-    duplicates — checks existence before inserting to stay dialect-neutral."""
+async def upsert_subscriber(bot_id: int, telegram_id: int) -> bool:
+    """Record that telegram_id has interacted with bot_id. Returns True if
+    this is a new subscriber, False if already known. Dialect-neutral."""
     async with get_session() as session:
         existing = await session.scalar(
             select(BotSubscriber.id).where(
@@ -307,6 +307,19 @@ async def upsert_subscriber(bot_id: int, telegram_id: int) -> None:
         )
         if existing is None:
             session.add(BotSubscriber(bot_id=bot_id, telegram_id=telegram_id))
+            return True
+        return False
+
+
+async def get_bot_owner_telegram_id(bot_id: int) -> int | None:
+    """Return the Telegram ID of the client who owns bot_id. None if not found."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client.telegram_id)
+            .join(BotConfig, BotConfig.client_id == Client.id)
+            .where(BotConfig.id == bot_id)
+        )
+        return result.scalar_one_or_none()
 
 
 async def get_subscriber_ids(bot_id: int) -> list[int]:
