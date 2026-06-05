@@ -1,10 +1,11 @@
 import asyncio
+import csv
 import html
 import os
 import re
 import signal
 from datetime import datetime, timedelta, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -88,6 +89,7 @@ from db.repository import (
     get_blacklist,
     add_to_blacklist,
     remove_from_blacklist,
+    get_subscribers_for_export,
 )
 from pipeline import (
     _token_accumulator,
@@ -2376,11 +2378,49 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
         f"   Среднее/юзер: {analytics['avg_messages_per_user']}\n"
         f"⏰ Пиковый час: {peak_str}"
     )
-    back_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")
-    ]])
+    analytics_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📥 Экспорт подписчиков",
+            callback_data=f"bot:export_subs:{bot_id}",
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")],
+    ])
     if callback.message is not None:
-        await callback.message.answer(text, reply_markup=back_kb)
+        await callback.message.answer(text, reply_markup=analytics_kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:export_subs:"))
+async def cb_bot_export_subs(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:export_subs:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    rows = await get_subscribers_for_export(bot_id, client_id)
+    if rows is None:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+    if not rows:
+        await callback.answer("Подписчиков пока нет.", show_alert=True)
+        return
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    bot_name = bot_cfg.bot_name if bot_cfg else str(bot_id)
+    buf = StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["telegram_id", "joined_at"])
+    writer.writeheader()
+    for row in rows:
+        joined = row["joined_at"]
+        writer.writerow({
+            "telegram_id": row["telegram_id"],
+            "joined_at": joined.strftime("%Y-%m-%d %H:%M:%S") if joined else "",
+        })
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    filename = f"subscribers_{bot_name}_{date_str}.csv"
+    if callback.message is not None:
+        await callback.message.answer_document(
+            BufferedInputFile(buf.getvalue().encode("utf-8-sig"), filename=filename),
+            caption=f"📥 {len(rows)} подписчиков",
+        )
     await callback.answer()
 
 

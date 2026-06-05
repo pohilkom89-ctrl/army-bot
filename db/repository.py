@@ -322,6 +322,30 @@ async def get_bot_owner_telegram_id(bot_id: int) -> int | None:
         return result.scalar_one_or_none()
 
 
+async def get_subscribers_for_export(
+    bot_id: int, client_id: int
+) -> list[dict] | None:
+    """Return subscriber list for CSV export. None if client doesn't own the bot."""
+    async with get_session() as session:
+        owned = await session.scalar(
+            select(BotConfig.id).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if owned is None:
+            return None
+        result = await session.execute(
+            select(BotSubscriber.telegram_id, BotSubscriber.joined_at)
+            .where(BotSubscriber.bot_id == bot_id)
+            .order_by(BotSubscriber.joined_at)
+        )
+        return [
+            {"telegram_id": r.telegram_id, "joined_at": r.joined_at}
+            for r in result.all()
+        ]
+
+
 async def get_subscriber_ids(bot_id: int) -> list[int]:
     """Return all telegram_ids subscribed to bot_id."""
     async with get_session() as session:
