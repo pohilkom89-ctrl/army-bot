@@ -184,6 +184,11 @@ SYSTEM_PROMPT = Path("/app/system_prompt.txt").read_text(encoding="utf-8").strip
 _greeting_raw = Path("/app/greeting.txt").read_text(encoding="utf-8").strip()
 GREETING = _greeting_raw if _greeting_raw else "Привет! Я готов помочь. Задайте ваш вопрос."
 
+_blacklist_raw = Path("/app/blacklist.txt").read_text(encoding="utf-8")
+BLACKLIST: set[int] = {
+    int(line) for line in _blacklist_raw.splitlines() if line.strip().isdigit()
+}
+
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
     base_url="https://openrouter.ai/api/v1",
@@ -199,6 +204,8 @@ async def cmd_start(message: Message) -> None:
 
 @dp.message()
 async def on_message(message: Message) -> None:
+    if message.from_user and message.from_user.id in BLACKLIST:
+        return
     try:
         asyncio.create_task(report_subscriber(message.from_user.id))
         response = await openai_client.chat.completions.create(

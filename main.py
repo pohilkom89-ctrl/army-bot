@@ -38,6 +38,7 @@ from deployer import (
     remove_bot,
     stop_bot,
     write_bot_greeting,
+    write_bot_blacklist,
 )
 from db.repository import (
     anonymize_user,
@@ -84,6 +85,9 @@ from db.repository import (
     get_bot_scheduled_broadcasts,
     cancel_scheduled_broadcast,
     get_subscriber_stats,
+    get_blacklist,
+    add_to_blacklist,
+    remove_from_blacklist,
 )
 from pipeline import (
     _token_accumulator,
@@ -211,6 +215,10 @@ class MergeStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     confirm = State()
     sending = State()
+
+
+class BlacklistStates(StatesGroup):
+    waiting_id = State()
 
 
 class CloneStates(StatesGroup):
@@ -2741,6 +2749,12 @@ def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🚫 Чёрный список",
+                    callback_data=f"bot:blacklist:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="🏷 Переименовать",
                     callback_data=f"bot:edit_name:{bot_id}",
                 )
@@ -3155,6 +3169,136 @@ async def on_edit_greeting(message: Message, state: FSMContext) -> None:
         logger.exception("on_edit_greeting: redeploy failed bot_id={}", bot_id)
         await message.answer(
             "👋 Приветствие сохранено в настройках.\n"
+            "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
+        )
+
+
+@router.callback_query(F.data.startswith("bot:blacklist:"))
+async def cb_bot_blacklist(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:blacklist:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bl = await get_blacklist(bot_id, client_id)
+    if bl is None:
+        await callback.answer("Бот не найден.")
+        return
+    lines = [f"🚫 Чёрный список бота (ID: {bot_id})"]
+    buttons: list[list[InlineKeyboardButton]] = []
+    if bl:
+        lines.append("")
+        for tid in bl:
+            lines.append(f"• {tid}")
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"❌ Удалить {tid}",
+                    callback_data=f"blacklist:remove:{bot_id}:{tid}",
+                )
+            ])
+    else:
+        lines.append("\nСписок пуст.")
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Добавить ID",
+            callback_data=f"blacklist:add:{bot_id}",
+        )
+    ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"bot:edit:{bot_id}",
+        )
+    ])
+    if callback.message is not None:
+        await callback.message.answer(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("blacklist:remove:"))
+async def cb_blacklist_remove(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    # format: blacklist:remove:{bot_id}:{telegram_id}
+    if len(parts) < 4:
+        await callback.answer("Некорректные данные.")
+        return
+    try:
+        bot_id = int(parts[2])
+        telegram_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректные данные.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    removed = await remove_from_blacklist(bot_id, client.id, telegram_id)
+    if not removed:
+        await callback.answer("Не найдено.")
+        return
+    # Sync file + redeploy
+    bl = await get_blacklist(bot_id, client.id)
+    try:
+        await asyncio.to_thread(write_bot_blacklist, bot_id, bl or [])
+        await redeploy_bot(bot_id)
+        await callback.answer(f"✅ {telegram_id} удалён, бот перезапущен.")
+    except Exception:
+        logger.exception("cb_blacklist_remove: redeploy failed bot_id={}", bot_id)
+        await callback.answer("Удалён из настроек. Перезапуск не удался.")
+    # Refresh the blacklist view
+    if callback.message is not None:
+        await callback.message.delete()
+
+
+@router.callback_query(F.data.startswith("blacklist:add:"))
+async def cb_blacklist_add(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "blacklist:add:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите Telegram ID пользователя (число), которого хотите заблокировать."
+        )
+    await state.set_state(BlacklistStates.waiting_id)
+    await state.update_data(blacklist_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(BlacklistStates.waiting_id)
+async def on_blacklist_id(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text.lstrip("-").isdigit():
+        await message.answer("Нужно число — Telegram ID. Попробуйте ещё раз.")
+        return
+    telegram_id = int(text)
+    data = await state.get_data()
+    bot_id = data.get("blacklist_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    added = await add_to_blacklist(bot_id, client.id, telegram_id)
+    await state.clear()
+    if not added:
+        await message.answer(f"ID {telegram_id} уже в чёрном списке или бот не найден.")
+        return
+    bl = await get_blacklist(bot_id, client.id)
+    try:
+        await asyncio.to_thread(write_bot_blacklist, bot_id, bl or [])
+        await redeploy_bot(bot_id)
+        await message.answer(f"🚫 {telegram_id} добавлен в чёрный список и бот перезапущен.")
+    except Exception:
+        logger.exception("on_blacklist_id: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            f"🚫 {telegram_id} добавлен в настройки.\n"
             "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
         )
 

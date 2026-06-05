@@ -1480,3 +1480,67 @@ async def cancel_scheduled_broadcast(broadcast_id: int, client_id: int) -> bool:
             return False
         await session.delete(row)
         return True
+
+
+# ---------------------------------------------------------------------------
+# Blacklist management (stored in config_json["blacklist"])
+# ---------------------------------------------------------------------------
+
+async def get_blacklist(bot_id: int, client_id: int) -> list[int] | None:
+    """Return blacklist for a bot owned by client_id. None if not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return None
+        cfg = bot.config_json or {}
+        return list(cfg.get("blacklist", []))
+
+
+async def add_to_blacklist(bot_id: int, client_id: int, telegram_id: int) -> bool:
+    """Add telegram_id to the bot's blacklist. Returns False if already present or not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        cfg = dict(bot.config_json or {})
+        bl: list[int] = list(cfg.get("blacklist", []))
+        if telegram_id in bl:
+            return False
+        bl.append(telegram_id)
+        cfg["blacklist"] = bl
+        bot.config_json = cfg
+        return True
+
+
+async def remove_from_blacklist(bot_id: int, client_id: int, telegram_id: int) -> bool:
+    """Remove telegram_id from the bot's blacklist. Returns False if not present or not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        cfg = dict(bot.config_json or {})
+        bl: list[int] = list(cfg.get("blacklist", []))
+        if telegram_id not in bl:
+            return False
+        bl.remove(telegram_id)
+        cfg["blacklist"] = bl
+        bot.config_json = cfg
+        return True

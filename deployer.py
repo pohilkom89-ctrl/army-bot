@@ -53,6 +53,7 @@ COPY main.py /app/main.py
 COPY usage_reporter.py /app/usage_reporter.py
 COPY system_prompt.txt /app/system_prompt.txt
 COPY greeting.txt /app/greeting.txt
+COPY blacklist.txt /app/blacklist.txt
 
 CMD ["python", "main.py"]
 """
@@ -74,9 +75,11 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
     bot_dir = _bot_dir(bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "main.py").write_text(bot_code, encoding="utf-8")
-    # greeting.txt must exist in build context (COPY in Dockerfile); default empty
+    # greeting.txt and blacklist.txt must exist in build context (COPY in Dockerfile)
     if not (bot_dir / "greeting.txt").exists():
         (bot_dir / "greeting.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "blacklist.txt").exists():
+        (bot_dir / "blacklist.txt").write_text("", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -113,6 +116,14 @@ def _ensure_runtime_files(bot_dir: Path) -> None:
             f"deployer: runtime helper {src} missing — cannot build bot images"
         )
     shutil.copy2(src, bot_dir / "usage_reporter.py")
+
+
+def write_bot_blacklist(bot_id: int, telegram_ids: list[int]) -> None:
+    """Write blacklist.txt for the bot. One telegram_id per line."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(str(tid) for tid in telegram_ids)
+    (bot_dir / "blacklist.txt").write_text(content, encoding="utf-8")
 
 
 def write_bot_greeting(bot_id: int, greeting: str) -> None:

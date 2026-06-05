@@ -35,6 +35,11 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * `GREETING = _greeting_raw if _greeting_raw else "Привет! Задайте ваш вопрос."`
   * В хендлере `/start`: `await message.answer(GREETING)`
   * Файл `greeting.txt` уже лежит в /app (может быть пустым — тогда использовать дефолт)
+- Чёрный список пользователей читай из файла при старте:
+  * `_blacklist_raw = Path("/app/blacklist.txt").read_text(encoding="utf-8")`
+  * `BLACKLIST: set[int] = {int(line) for line in _blacklist_raw.splitlines() if line.strip().isdigit()}`
+  * В каждом message-хендлере (кроме /start) в самом начале проверяй: `if message.from_user and message.from_user.id in BLACKLIST: return`
+  * Файл `blacklist.txt` уже лежит в /app (может быть пустым)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота
