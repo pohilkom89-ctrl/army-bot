@@ -181,6 +181,8 @@ if not OPENROUTER_API_KEY:
 
 MODEL = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
 SYSTEM_PROMPT = Path("/app/system_prompt.txt").read_text(encoding="utf-8").strip()
+_greeting_raw = Path("/app/greeting.txt").read_text(encoding="utf-8").strip()
+GREETING = _greeting_raw if _greeting_raw else "Привет! Я готов помочь. Задайте ваш вопрос."
 
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -192,9 +194,7 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     asyncio.create_task(report_subscriber(message.from_user.id))
-    await message.answer(
-        "Привет! Я готов помочь. Задайте ваш вопрос."
-    )
+    await message.answer(GREETING)
 
 
 @dp.message()

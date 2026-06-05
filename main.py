@@ -37,6 +37,7 @@ from deployer import (
     prepare_bot_files,
     remove_bot,
     stop_bot,
+    write_bot_greeting,
 )
 from db.repository import (
     anonymize_user,
@@ -3129,7 +3130,17 @@ async def on_edit_greeting(message: Message, state: FSMContext) -> None:
         await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
         return
     await state.clear()
-    await message.answer("💬 Приветствие сохранено. /mybots")
+    # Write greeting.txt and rebuild container so the bot picks it up
+    try:
+        await asyncio.to_thread(write_bot_greeting, bot_id, text)
+        await redeploy_bot(bot_id)
+        await message.answer("👋 Приветствие сохранено и бот перезапущен.")
+    except Exception:
+        logger.exception("on_edit_greeting: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            "👋 Приветствие сохранено в настройках.\n"
+            "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
+        )
 
 
 @router.callback_query(F.data.startswith("bot:edit_name:"))

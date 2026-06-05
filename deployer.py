@@ -52,6 +52,7 @@ RUN pip install --no-cache-dir \\
 COPY main.py /app/main.py
 COPY usage_reporter.py /app/usage_reporter.py
 COPY system_prompt.txt /app/system_prompt.txt
+COPY greeting.txt /app/greeting.txt
 
 CMD ["python", "main.py"]
 """
@@ -73,6 +74,9 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
     bot_dir = _bot_dir(bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "main.py").write_text(bot_code, encoding="utf-8")
+    # greeting.txt must exist in build context (COPY in Dockerfile); default empty
+    if not (bot_dir / "greeting.txt").exists():
+        (bot_dir / "greeting.txt").write_text("", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -109,6 +113,13 @@ def _ensure_runtime_files(bot_dir: Path) -> None:
             f"deployer: runtime helper {src} missing — cannot build bot images"
         )
     shutil.copy2(src, bot_dir / "usage_reporter.py")
+
+
+def write_bot_greeting(bot_id: int, greeting: str) -> None:
+    """Write greeting.txt for the bot. Empty string = use bot's default greeting."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "greeting.txt").write_text(greeting or "", encoding="utf-8")
 
 
 def _write_system_prompt(bot_dir: Path, system_prompt: str) -> None:

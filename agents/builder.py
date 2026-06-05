@@ -30,6 +30,11 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * `SYSTEM_PROMPT = Path("/app/system_prompt.txt").read_text(encoding="utf-8").strip()`
   * Файл `system_prompt.txt` уже лежит в /app, deployer кладёт туда актуальный текст из БД при каждом build
   * НЕ копируй текст промпта в исходник — он будет рассинхронизирован после `/mybots → редактировать → промпт`
+- Приветствие при /start ОБЯЗАТЕЛЬНО читай из файла:
+  * `_greeting_raw = Path("/app/greeting.txt").read_text(encoding="utf-8").strip()`
+  * `GREETING = _greeting_raw if _greeting_raw else "Привет! Задайте ваш вопрос."`
+  * В хендлере `/start`: `await message.answer(GREETING)`
+  * Файл `greeting.txt` уже лежит в /app (может быть пустым — тогда использовать дефолт)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота
