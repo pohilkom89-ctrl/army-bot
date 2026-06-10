@@ -66,6 +66,17 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * В message-хендлере: append user message → build messages=[system]+history → LLM → append assistant reply
   * При ошибке LLM — откатывай последний user message из истории
   * В `messages` для LLM: `[{"role": "system", "content": SYSTEM_PROMPT}] + _get_history(user.id)`
+- Фотографии (Vision):
+  * `import base64` в начале файла
+  * `VISION_MODEL = os.getenv("OPENROUTER_MODEL_VISION", "google/gemini-flash-1.5")`
+  * Хендлер `@dp.message(F.photo)` — регистрировать ПЕРЕД `@dp.message(F.voice)` и catch-all `@dp.message()`
+  * Логика: blacklist → rate_limit → скачай `message.photo[-1]` (лучшее качество) через `get_file`/`download_file` → base64-кодируй → при ошибке скачивания answer("Не удалось обработать изображение.") и return
+  * Сохрани `prior_history = _get_history(user.id)` ДО вызова `_append_history`
+  * В историю и report_message пиши текстовый placeholder: `f"[Фото] {caption}"` или `"[Фото]"`
+  * В LLM передавай `messages = [system] + prior_history + [{"role":"user","content":[{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}},{"type":"text","text": caption or "Что на этом изображении?"}]}]`
+  * Используй `VISION_MODEL`, не основной `MODEL`
+  * report_usage, append_history("assistant"), report_message("bot") — как обычно
+  * При ошибке LLM — откатывай placeholder из истории
 - Голосовые сообщения:
   * `import io` в начале файла
   * `from aiogram import Bot, Dispatcher, F` (добавить F)

@@ -161,6 +161,7 @@ TEMPLATES: dict[str, BotTemplate] = {
 
 STANDARD_BOT_CODE = '''\
 import asyncio
+import base64
 import io
 import os
 from datetime import datetime, timezone
@@ -187,6 +188,7 @@ if not OPENROUTER_API_KEY:
 
 MODEL = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
 WHISPER_MODEL = os.getenv("OPENROUTER_MODEL_WHISPER", "openai/whisper-1")
+VISION_MODEL = os.getenv("OPENROUTER_MODEL_VISION", "google/gemini-flash-1.5")
 SYSTEM_PROMPT = Path("/app/system_prompt.txt").read_text(encoding="utf-8").strip()
 _greeting_raw = Path("/app/greeting.txt").read_text(encoding="utf-8").strip()
 GREETING = _greeting_raw if _greeting_raw else "Привет! Я готов помочь. Задайте ваш вопрос."
@@ -284,6 +286,59 @@ async def cmd_start(message: Message) -> None:
 async def cmd_reset(message: Message) -> None:
     _clear_history(message.from_user.id)
     await message.answer("История диалога сброшена. Начнём заново!")
+
+
+@dp.message(F.photo)
+async def on_photo(message: Message) -> None:
+    if message.from_user and message.from_user.id in BLACKLIST:
+        return
+    if message.from_user and _is_rate_limited(message.from_user.id):
+        return
+    user = message.from_user
+    if user is None:
+        return
+    try:
+        photo = message.photo[-1]
+        file_info = await message.bot.get_file(photo.file_id)
+        bio = await message.bot.download_file(file_info.file_path)
+        b64 = base64.b64encode(bio.read()).decode()
+    except Exception:
+        logger.exception("on_photo: download failed user_id={}", user.id)
+        await message.answer("Не удалось обработать изображение. Попробуйте ещё раз.")
+        return
+    caption = (message.caption or "").strip()
+    history_label = f"[Фото] {caption}" if caption else "[Фото]"
+    prior_history = _get_history(user.id)
+    _append_history(user.id, "user", history_label)
+    asyncio.create_task(_fire_webhook(message))
+    asyncio.create_task(report_subscriber(user.id))
+    asyncio.create_task(report_message(user.id, user.username, "user", history_label))
+    image_content = [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        {"type": "text", "text": caption if caption else "Что на этом изображении?"},
+    ]
+    try:
+        messages = (
+            [{"role": "system", "content": SYSTEM_PROMPT}]
+            + prior_history
+            + [{"role": "user", "content": image_content}]
+        )
+        response = await openai_client.chat.completions.create(
+            model=VISION_MODEL,
+            max_tokens=2048,
+            messages=messages,
+        )
+        asyncio.create_task(report_usage(response.usage, VISION_MODEL))
+        reply = response.choices[0].message.content or ""
+        _append_history(user.id, "assistant", reply)
+        asyncio.create_task(report_message(user.id, user.username, "bot", reply))
+        await message.answer(reply)
+    except Exception:
+        logger.exception("on_photo: LLM failed user_id={}", user.id)
+        hist = _history.get(user.id, [])
+        if hist and hist[-1]["role"] == "user":
+            _history[user.id] = hist[:-1]
+        await message.answer("Произошла ошибка. Попробуйте ещё раз.")
 
 
 @dp.message(F.voice)
