@@ -213,6 +213,26 @@ def _is_rate_limited(telegram_id: int) -> bool:
     _rate_counters[telegram_id] = times
     return False
 
+MAX_HISTORY = 20  # messages per user (10 exchanges)
+_history: dict[int, list[dict]] = {}
+
+
+def _get_history(telegram_id: int) -> list[dict]:
+    return _history.get(telegram_id, [])
+
+
+def _append_history(telegram_id: int, role: str, content: str) -> None:
+    msgs = _history.get(telegram_id, [])
+    msgs.append({"role": role, "content": content})
+    if len(msgs) > MAX_HISTORY:
+        msgs = msgs[-MAX_HISTORY:]
+    _history[telegram_id] = msgs
+
+
+def _clear_history(telegram_id: int) -> None:
+    _history.pop(telegram_id, None)
+
+
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
     base_url="https://openrouter.ai/api/v1",
@@ -242,7 +262,14 @@ async def _fire_webhook(message: Message) -> None:
 @dp.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     asyncio.create_task(report_subscriber(message.from_user.id))
+    _clear_history(message.from_user.id)
     await message.answer(GREETING)
+
+
+@dp.message(Command("reset"))
+async def cmd_reset(message: Message) -> None:
+    _clear_history(message.from_user.id)
+    await message.answer("История диалога сброшена. Начнём заново!")
 
 
 @dp.message()
@@ -258,23 +285,28 @@ async def on_message(message: Message) -> None:
         if keyword.lower() in text_lower:
             await message.answer(response)
             return
-    asyncio.create_task(report_message(user.id, user.username, "user", message.text or ""))
+    user_text = message.text or ""
+    asyncio.create_task(report_message(user.id, user.username, "user", user_text))
+    _append_history(user.id, "user", user_text)
     try:
         asyncio.create_task(report_subscriber(user.id))
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + _get_history(user.id)
         response = await openai_client.chat.completions.create(
             model=MODEL,
             max_tokens=2048,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": message.text or ""},
-            ],
+            messages=messages,
         )
         asyncio.create_task(report_usage(response.usage, MODEL))
         reply = response.choices[0].message.content or ""
+        _append_history(user.id, "assistant", reply)
         asyncio.create_task(report_message(user.id, user.username, "bot", reply))
         await message.answer(reply)
     except Exception:
         logger.exception("on_message failed for user_id={}", user.id)
+        # Roll back the user message on error so history stays consistent
+        hist = _history.get(user.id, [])
+        if hist and hist[-1]["role"] == "user":
+            _history[user.id] = hist[:-1]
         await message.answer("Произошла ошибка. Попробуйте ещё раз.")
 
 

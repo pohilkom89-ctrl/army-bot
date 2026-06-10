@@ -58,6 +58,14 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * Функция `_is_rate_limited(telegram_id) -> bool`: если RATE_LIMIT_MAX <= 0 — False; иначе очищай устаревшие метки, если len >= max — True, иначе добавляй метку и False
   * В каждом message-хендлере (кроме /start) ПОСЛЕ blacklist: `if message.from_user and _is_rate_limited(message.from_user.id): return`
   * Файл `rate_limit.txt` уже лежит в /app (0 = отключён)
+- Многооборотный диалог (conversation memory):
+  * `MAX_HISTORY = 20` (сообщений на пользователя)
+  * `_history: dict[int, list[dict]] = {}` — {telegram_id: [{role, content}, ...]}
+  * Функции: `_get_history(uid)`, `_append_history(uid, role, content)` (trimming до MAX_HISTORY), `_clear_history(uid)`
+  * В `/start` и `/reset` — вызывай `_clear_history(user.id)`
+  * В message-хендлере: append user message → build messages=[system]+history → LLM → append assistant reply
+  * При ошибке LLM — откатывай последний user message из истории
+  * В `messages` для LLM: `[{"role": "system", "content": SYSTEM_PROMPT}] + _get_history(user.id)`
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота
