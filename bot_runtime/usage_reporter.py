@@ -27,6 +27,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=5)
 _ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/log_tokens"
 _SUBSCRIBER_ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/track_subscriber"
 _MESSAGE_ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/log_message"
+_HISTORY_ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/history"
 
 
 async def report_usage(usage: Any, model: str) -> None:
@@ -78,6 +79,29 @@ async def report_subscriber(telegram_id: int) -> None:
             await session.post(_SUBSCRIBER_ENDPOINT, json=payload, headers=headers)
     except Exception as e:
         logger.warning("usage_reporter: subscriber POST failed — {}", e)
+
+
+async def load_history(telegram_id: int) -> list[dict]:
+    """Fetch conversation history for this bot+user from the factory DB.
+
+    Returns a list of {role, content} dicts in chronological order, ready to
+    be used as the messages list for the LLM. Returns [] on any failure so the
+    bot continues working without context rather than crashing.
+    """
+    if _BOT_ID is None or not _INTERNAL_API_KEY:
+        return []
+    params = {"bot_id": str(_BOT_ID), "telegram_id": str(telegram_id)}
+    headers = {"X-Internal-Key": _INTERNAL_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+            async with session.get(
+                _HISTORY_ENDPOINT, params=params, headers=headers
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        logger.warning("usage_reporter: load_history failed — {}", e)
+    return []
 
 
 async def report_message(

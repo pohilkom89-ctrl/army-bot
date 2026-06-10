@@ -1716,6 +1716,34 @@ async def log_bot_message(
             )
 
 
+async def get_user_bot_history(
+    bot_id: int, telegram_id: int, limit: int = 20
+) -> list[dict]:
+    """Return last `limit` messages for a specific user on a bot, in chronological order.
+
+    Maps role 'bot' → 'assistant' for direct use as LLM messages list.
+    Used by generated bots to restore conversation context after restart.
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotMessage)
+            .where(
+                BotMessage.bot_id == bot_id,
+                BotMessage.telegram_id == telegram_id,
+            )
+            .order_by(BotMessage.created_at.desc())
+            .limit(limit)
+        )
+        rows = list(result.scalars().all())
+    return [
+        {
+            "role": "user" if r.role == "user" else "assistant",
+            "content": r.text,
+        }
+        for r in reversed(rows)
+    ]
+
+
 async def get_bot_recent_conversations(
     bot_id: int, client_id: int, limit: int = 20
 ) -> list[dict] | None:

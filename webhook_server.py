@@ -11,6 +11,7 @@ from aiogram import Bot
 from db.repository import (
     get_bot_by_id_any,
     get_bot_owner_telegram_id,
+    get_user_bot_history,
     log_bot_message,
     log_tokens,
     upsert_subscriber,
@@ -205,6 +206,24 @@ async def _notify_owner_new_subscriber(
         )
 
 
+async def get_history_endpoint(request: web.Request) -> web.Response:
+    expected = os.getenv("INTERNAL_API_KEY", "")
+    if not expected:
+        return web.Response(status=503, text="not configured")
+    provided = request.headers.get("X-Internal-Key", "")
+    if not secrets.compare_digest(provided, expected):
+        logger.warning("get_history: bad key from {}", request.remote)
+        return web.Response(status=401, text="unauthorized")
+    try:
+        bot_id = int(request.rel_url.query["bot_id"])
+        telegram_id = int(request.rel_url.query["telegram_id"])
+    except (KeyError, ValueError, TypeError) as e:
+        return web.Response(status=400, text=f"invalid params: {e}")
+    limit = min(int(request.rel_url.query.get("limit", "20")), 50)
+    rows = await get_user_bot_history(bot_id, telegram_id, limit)
+    return web.json_response(rows)
+
+
 async def log_message_endpoint(request: web.Request) -> web.Response:
     expected = os.getenv("INTERNAL_API_KEY", "")
     if not expected:
@@ -245,6 +264,7 @@ def build_app(bot: Bot) -> web.Application:
     app.router.add_post("/internal/log_tokens", log_tokens_endpoint)
     app.router.add_post("/internal/track_subscriber", track_subscriber_endpoint)
     app.router.add_post("/internal/log_message", log_message_endpoint)
+    app.router.add_get("/internal/history", get_history_endpoint)
     register_health_routes(app)
     return app
 

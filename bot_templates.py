@@ -176,7 +176,7 @@ from aiogram.filters import Command
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from loguru import logger
 from openai import AsyncOpenAI
-from usage_reporter import report_message, report_subscriber, report_usage
+from usage_reporter import load_history, report_message, report_subscriber, report_usage
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -231,6 +231,27 @@ def _is_rate_limited(telegram_id: int) -> bool:
 
 MAX_HISTORY = 20  # messages per user (10 exchanges)
 _history: dict[int, list[dict]] = {}
+_history_loaded: set[int] = set()  # users whose history was fetched from DB this session
+
+
+async def _ensure_history_loaded(telegram_id: int) -> None:
+    """Lazy-load conversation history from factory DB on first message per user.
+
+    Skipped if already loaded this session (in-memory flag). On /start and
+    /reset the user is pre-added to _history_loaded so old history is not
+    restored when the user explicitly wants a fresh start.
+    """
+    if telegram_id in _history_loaded:
+        return
+    _history_loaded.add(telegram_id)
+    if _history.get(telegram_id):
+        return
+    try:
+        msgs = await load_history(telegram_id)
+        if msgs:
+            _history[telegram_id] = msgs[-MAX_HISTORY:]
+    except Exception:
+        pass
 
 
 def _get_history(telegram_id: int) -> list[dict]:
@@ -279,12 +300,14 @@ async def _fire_webhook(message: Message) -> None:
 async def cmd_start(message: Message) -> None:
     asyncio.create_task(report_subscriber(message.from_user.id))
     _clear_history(message.from_user.id)
+    _history_loaded.add(message.from_user.id)
     await message.answer(GREETING, reply_markup=_make_reply_keyboard())
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
     _clear_history(message.from_user.id)
+    _history_loaded.add(message.from_user.id)
     await message.answer("История диалога сброшена. Начнём заново!")
 
 
@@ -297,6 +320,7 @@ async def on_photo(message: Message) -> None:
     user = message.from_user
     if user is None:
         return
+    await _ensure_history_loaded(user.id)
     try:
         photo = message.photo[-1]
         file_info = await message.bot.get_file(photo.file_id)
@@ -350,6 +374,7 @@ async def on_voice(message: Message) -> None:
     user = message.from_user
     if user is None:
         return
+    await _ensure_history_loaded(user.id)
     try:
         file_info = await message.bot.get_file(message.voice.file_id)
         bio = await message.bot.download_file(file_info.file_path)
@@ -400,8 +425,11 @@ async def on_message(message: Message) -> None:
         return
     if message.from_user and _is_rate_limited(message.from_user.id):
         return
-    asyncio.create_task(_fire_webhook(message))
     user = message.from_user
+    if user is None:
+        return
+    await _ensure_history_loaded(user.id)
+    asyncio.create_task(_fire_webhook(message))
     text_lower = (message.text or "").lower()
     for keyword, response in TRIGGERS.items():
         if keyword.lower() in text_lower:
