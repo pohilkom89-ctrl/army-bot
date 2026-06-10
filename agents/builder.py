@@ -66,6 +66,15 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * В message-хендлере: append user message → build messages=[system]+history → LLM → append assistant reply
   * При ошибке LLM — откатывай последний user message из истории
   * В `messages` для LLM: `[{"role": "system", "content": SYSTEM_PROMPT}] + _get_history(user.id)`
+- Голосовые сообщения:
+  * `import io` в начале файла
+  * `from aiogram import Bot, Dispatcher, F` (добавить F)
+  * `WHISPER_MODEL = os.getenv("OPENROUTER_MODEL_WHISPER", "openai/whisper-1")`
+  * Хендлер `@dp.message(F.voice)` — регистрировать ПЕРЕД catch-all `@dp.message()`
+  * Логика: проверь blacklist → rate_limit → скачай файл через `message.bot.get_file` + `message.bot.download_file` → установи `.name = "voice.ogg"` → транскрибируй через `await openai_client.audio.transcriptions.create(model=WHISPER_MODEL, file=bio)` → при ошибке answer("Не удалось распознать. Напишите текстом.") и return
+  * После успешной транскрипции: fire_webhook, trigger-check, append_history("user"), LLM-вызов, append_history("assistant"), ответить пользователю — та же цепочка что и в text-хендлере
+  * В report_message: передавай `f"[🎤] {user_text}"` чтобы пометить голосовой
+  * При ошибке LLM — откатывай user message из истории
 - Кнопки быстрых ответов:
   * `from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove`
   * `QUICK_REPLIES: list[str] = json.loads(Path("/app/quick_replies.json").read_text(encoding="utf-8"))`

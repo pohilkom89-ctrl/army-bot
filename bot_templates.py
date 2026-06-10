@@ -161,6 +161,7 @@ TEMPLATES: dict[str, BotTemplate] = {
 
 STANDARD_BOT_CODE = '''\
 import asyncio
+import io
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -169,7 +170,7 @@ import json as _json
 import time
 
 import aiohttp
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from loguru import logger
@@ -185,6 +186,7 @@ if not OPENROUTER_API_KEY:
     raise RuntimeError("OPENROUTER_API_KEY env var is required")
 
 MODEL = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
+WHISPER_MODEL = os.getenv("OPENROUTER_MODEL_WHISPER", "openai/whisper-1")
 SYSTEM_PROMPT = Path("/app/system_prompt.txt").read_text(encoding="utf-8").strip()
 _greeting_raw = Path("/app/greeting.txt").read_text(encoding="utf-8").strip()
 GREETING = _greeting_raw if _greeting_raw else "Привет! Я готов помочь. Задайте ваш вопрос."
@@ -282,6 +284,59 @@ async def cmd_start(message: Message) -> None:
 async def cmd_reset(message: Message) -> None:
     _clear_history(message.from_user.id)
     await message.answer("История диалога сброшена. Начнём заново!")
+
+
+@dp.message(F.voice)
+async def on_voice(message: Message) -> None:
+    if message.from_user and message.from_user.id in BLACKLIST:
+        return
+    if message.from_user and _is_rate_limited(message.from_user.id):
+        return
+    user = message.from_user
+    if user is None:
+        return
+    try:
+        file_info = await message.bot.get_file(message.voice.file_id)
+        bio = await message.bot.download_file(file_info.file_path)
+        bio.name = "voice.ogg"
+        transcript = await openai_client.audio.transcriptions.create(
+            model=WHISPER_MODEL, file=bio
+        )
+        user_text = (transcript.text or "").strip()
+    except Exception:
+        logger.exception("on_voice: transcription failed user_id={}", user.id)
+        await message.answer("Не удалось распознать голосовое сообщение. Напишите текстом.")
+        return
+    if not user_text:
+        await message.answer("Голосовое сообщение пустое или не распознано.")
+        return
+    asyncio.create_task(_fire_webhook(message))
+    text_lower = user_text.lower()
+    for keyword, response in TRIGGERS.items():
+        if keyword.lower() in text_lower:
+            await message.answer(response)
+            return
+    asyncio.create_task(report_message(user.id, user.username, "user", f"[🎤] {user_text}"))
+    _append_history(user.id, "user", user_text)
+    try:
+        asyncio.create_task(report_subscriber(user.id))
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + _get_history(user.id)
+        response = await openai_client.chat.completions.create(
+            model=MODEL,
+            max_tokens=2048,
+            messages=messages,
+        )
+        asyncio.create_task(report_usage(response.usage, MODEL))
+        reply = response.choices[0].message.content or ""
+        _append_history(user.id, "assistant", reply)
+        asyncio.create_task(report_message(user.id, user.username, "bot", reply))
+        await message.answer(reply)
+    except Exception:
+        logger.exception("on_voice: LLM failed user_id={}", user.id)
+        hist = _history.get(user.id, [])
+        if hist and hist[-1]["role"] == "user":
+            _history[user.id] = hist[:-1]
+        await message.answer("Произошла ошибка. Попробуйте ещё раз.")
 
 
 @dp.message()
