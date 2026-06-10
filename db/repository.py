@@ -111,6 +111,7 @@ async def save_bot_config(
     system_prompt: str,
     config: dict,
     bot_token: str,
+    platform: str = "telegram",
 ) -> BotConfig:
     async with get_session() as session:
         bot = BotConfig(
@@ -120,6 +121,7 @@ async def save_bot_config(
             bot_token=bot_token,
             system_prompt=system_prompt,
             config_json=config,
+            platform=platform,
         )
         session.add(bot)
         await session.flush()

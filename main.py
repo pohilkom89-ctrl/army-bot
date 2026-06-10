@@ -32,10 +32,12 @@ from bot_templates import STANDARD_BOT_CODE, TEMPLATES, get_template
 from deployer import (
     clone_bot_files,
     deploy_bot,
+    deploy_vk_bot,
     redeploy_bot,
     get_bot_logs,
     get_bot_status,
     prepare_bot_files,
+    prepare_vk_bot_files,
     remove_bot,
     stop_bot,
     write_bot_greeting,
@@ -189,6 +191,7 @@ class IntakeStates(StatesGroup):
     consent = State()
     ask_type = State()        # single-type (starter)
     ask_type_multi = State()  # multi-type toggle (pro/business)
+    ask_vk_token = State()    # VK community token (collected before questionnaire)
     answering = State()
     clarifying = State()
     ask_bot_token = State()
@@ -302,6 +305,10 @@ def _bot_type_keyboard() -> InlineKeyboardMarkup:
         ]
         for key, spec in QUESTIONNAIRES.items()
     ]
+    rows.append([InlineKeyboardButton(
+        text="🔵 Создать VK-бота (ВКонтакте)",
+        callback_data="vk:start",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -642,6 +649,78 @@ async def cb_btype_multi(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+# --- VK bot creation flow ---
+
+@router.callback_query(IntakeStates.ask_type, F.data == "vk:start")
+async def cb_vk_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(platform="vk")
+    await state.set_state(IntakeStates.ask_vk_token)
+    await callback.message.answer(
+        "Отлично! Для VK-бота нужен токен сообщества.\n\n"
+        "Перейдите в настройки своего VK-сообщества → Работа с API → "
+        "Создайте ключ доступа с правами: сообщения, фотографии.\n\n"
+        "Отправьте токен сообщества:"
+    )
+    await callback.answer()
+
+
+async def _validate_vk_token(token: str) -> bool:
+    """Call VK API groups.getById to verify the community token is valid."""
+    import aiohttp
+    url = "https://api.vk.com/method/groups.getById"
+    params = {"access_token": token, "v": "5.131"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json()
+                return "response" in data
+    except Exception:
+        return False
+
+
+@router.message(IntakeStates.ask_vk_token)
+async def on_vk_token(message: Message, state: FSMContext) -> None:
+    token = (message.text or "").strip()
+    if not token:
+        await message.answer("Пожалуйста, отправьте токен сообщества ВКонтакте.")
+        return
+
+    await message.answer("Проверяю токен...")
+    valid = await _validate_vk_token(token)
+    if not valid:
+        await message.answer(
+            "Токен недействителен или у него нет нужных прав.\n"
+            "Проверьте токен и отправьте ещё раз."
+        )
+        return
+
+    await state.update_data(vk_token=token)
+    await state.set_state(IntakeStates.ask_type)
+    await message.answer(
+        "Токен VK-сообщества принят!\n\n"
+        "Теперь выберите тип бота:",
+        reply_markup=_bot_type_keyboard_vk(),
+    )
+
+
+def _bot_type_keyboard_vk() -> InlineKeyboardMarkup:
+    """Type selection for VK bots — same types but no VK entry point."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{spec['name']} — {spec['description']}",
+                callback_data=f"btype:{key}",
+            )
+        ]
+        for key, spec in QUESTIONNAIRES.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _redact_sensitive(raw_answers: dict) -> tuple[dict, int]:
     """Strip sensitive answer values before sending to LLM. Returns
     (safe_answers, sensitive_count). Question text is preserved so the
@@ -727,11 +806,10 @@ async def on_answer(message: Message, state: FSMContext) -> None:
 
     await state.update_data(completed_answers=completed)
 
-    # Multi-type: skip clarification, go directly to token.
+    # Multi-type: skip clarification, go directly to token (or process for VK).
     selected_types = data.get("selected_types") or [bot_type]
     if len(selected_types) > 1:
-        await state.set_state(IntakeStates.ask_bot_token)
-        await message.answer(ASK_TOKEN_PROMPT)
+        await _goto_token_or_process(message, state)
         return
 
     # Single-type: existing clarification flow.
@@ -762,8 +840,7 @@ async def on_answer(message: Message, state: FSMContext) -> None:
         await message.answer(clarifying_qs[0])
         return
 
-    await state.set_state(IntakeStates.ask_bot_token)
-    await message.answer(ASK_TOKEN_PROMPT)
+    await _goto_token_or_process(message, state)
 
 
 @router.message(IntakeStates.clarifying)
@@ -794,26 +871,28 @@ async def on_clarifying(message: Message, state: FSMContext) -> None:
         await message.answer(questions[next_idx])
         return
 
-    await state.set_state(IntakeStates.ask_bot_token)
-    await message.answer(ASK_TOKEN_PROMPT)
+    await _goto_token_or_process(message, state)
 
 
-@router.message(IntakeStates.ask_bot_token)
-async def on_bot_token(message: Message, state: FSMContext) -> None:
+async def _goto_token_or_process(message: Message, state: FSMContext) -> None:
+    """After questionnaire: ask Telegram token or run VK pipeline directly."""
+    data = await state.get_data()
+    if data.get("platform") == "vk":
+        await state.set_state(IntakeStates.processing)
+        await _run_pipeline_and_save(message, state, data["vk_token"], platform="vk")
+    else:
+        await state.set_state(IntakeStates.ask_bot_token)
+        await message.answer(ASK_TOKEN_PROMPT)
+
+
+async def _run_pipeline_and_save(
+    message: Message,
+    state: FSMContext,
+    bot_token: str,
+    platform: str = "telegram",
+) -> None:
+    """Run pipeline, save bot config, prepare files, and deploy."""
     user = message.from_user
-    if user is None:
-        return
-
-    bot_token = (message.text or "").strip()
-    try:
-        validate_token(bot_token)
-    except TokenValidationError:
-        await message.answer(
-            "Это не похоже на токен бота. "
-            "Проверьте формат (цифры:буквы) и отправьте ещё раз."
-        )
-        return
-
     data = await state.get_data()
     bot_type = data.get("bot_type")
     raw_answers: dict = data.get("answers") or {}
@@ -822,7 +901,6 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
     completed_answers: dict = data.get("completed_answers") or {}
 
     if len(selected_types) > 1:
-        # Combine answers from all types; prefix question text with type name.
         combined_raw: dict = {}
         for type_key in selected_types:
             type_name = QUESTIONNAIRES[type_key]["name"]
@@ -850,21 +928,20 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
             "clarification_answers": clarification_answers,
         }
         raw_answers_to_save = raw_answers
-        final_type = None  # resolved from spec.requirements after pipeline
+        final_type = None
 
-    await state.set_state(IntakeStates.processing)
     await message.answer("Агенты приступили к работе, ожидайте ~60 секунд...")
 
     logger.info(
-        "intake: pipeline launched for tg_id={} bot_type={} q_count={} sensitive={}",
+        "intake: pipeline launched for tg_id={} bot_type={} q_count={} sensitive={} platform={}",
         user.id,
         bot_type,
         len(llm_answers),
         sensitive_count,
+        platform,
     )
     try:
         spec = await asyncio.to_thread(run_pipeline, pipeline_input)
-
         client = await get_or_create_client(user.id, user.username)
 
         # Second bots-limit gate: between consent and token submission a
@@ -916,10 +993,14 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
                 **config_extra,
             },
             bot_token=bot_token,
+            platform=platform,
         )
-        # Files live under bots/{bot_id}/ so multiple bots per client don't
-        # collide; deployer uses the same path.
-        prepare_bot_files(spec.bot_code, saved_bot.id)
+        if platform == "vk":
+            prepare_vk_bot_files(saved_bot.id, spec.system_prompt)
+        else:
+            # Files live under bots/{bot_id}/ so multiple bots per client don't
+            # collide; deployer uses the same path.
+            prepare_bot_files(spec.bot_code, saved_bot.id)
         for entry in spec.token_logs:
             await log_tokens(
                 client_id=client.id,
@@ -935,19 +1016,22 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
         return
 
     logger.info(
-        "intake: pipeline ok for client_id={} bot_id={} (code_len={} bytes)",
+        "intake: pipeline ok for client_id={} bot_id={} platform={}",
         client.id,
         saved_bot.id,
-        len(spec.bot_code),
+        platform,
     )
 
     deploy_ok = False
     try:
-        await deploy_bot(saved_bot.id)
+        if platform == "vk":
+            await deploy_vk_bot(saved_bot.id)
+        else:
+            await deploy_bot(saved_bot.id)
         deploy_ok = True
     except Exception:
         logger.exception(
-            "intake: deploy_bot failed for bot_id={}", saved_bot.id
+            "intake: deploy failed for bot_id={} platform={}", saved_bot.id, platform
         )
 
     post_create_kb = InlineKeyboardMarkup(
@@ -965,22 +1049,42 @@ async def on_bot_token(message: Message, state: FSMContext) -> None:
             ],
         ]
     )
+    platform_label = "VK" if platform == "vk" else "Telegram"
     if deploy_ok:
         await message.answer(
-            f"✅ Бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
+            f"✅ {platform_label}-бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
             f"Контейнер: bot_client_{saved_bot.id}\n\n"
             "Оформите подписку /subscribe чтобы открыть доступ клиентам.",
             reply_markup=post_create_kb,
         )
     else:
         await message.answer(
-            f"⚠️ Бот создан, но контейнер не поднялся.\n\nТип: {resolved_type}\n"
-            f"Файл: bots/{saved_bot.id}/main.py сохранён.\n\n"
+            f"⚠️ {platform_label}-бот создан, но контейнер не поднялся.\n\nТип: {resolved_type}\n\n"
             "Напишите в поддержку: вероятно конфликт токена или ошибка в коде бота. "
             "Можно посмотреть логи через /mybots → карточка бота.",
             reply_markup=post_create_kb,
         )
     await state.clear()
+
+
+@router.message(IntakeStates.ask_bot_token)
+async def on_bot_token(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+
+    bot_token = (message.text or "").strip()
+    try:
+        validate_token(bot_token)
+    except TokenValidationError:
+        await message.answer(
+            "Это не похоже на токен бота. "
+            "Проверьте формат (цифры:буквы) и отправьте ещё раз."
+        )
+        return
+
+    await state.set_state(IntakeStates.processing)
+    await _run_pipeline_and_save(message, state, bot_token, platform="telegram")
 
 
 _RU_MONTHS = (
@@ -2039,11 +2143,15 @@ def _bot_status_badge(bot) -> str:
     return "✅ активен" if bot.status == "active" else "⏸ на паузе"
 
 
+def _platform_icon(bot) -> str:
+    return "🔵" if getattr(bot, "platform", "telegram") == "vk" else "⚙️"
+
+
 def _mybots_keyboard(bots: list) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"⚙️ {b.bot_name} — управление",
+                text=f"{_platform_icon(b)} {b.bot_name} — управление",
                 callback_data=f"bot:manage:{b.id}",
             )
         ]
@@ -2063,8 +2171,10 @@ async def _render_mybots_list(client_id: int) -> tuple[str, InlineKeyboardMarkup
         stats = await get_bot_stats(b.id, client_id)
         if stats is not None:
             req_count = stats["request_count"]
+        platform = getattr(b, "platform", "telegram")
+        platform_tag = " 🔵 VK" if platform == "vk" else ""
         lines.append(
-            f"{i}. {b.bot_name} ({_bot_type_ru(b.bot_type)})\n"
+            f"{i}. {b.bot_name} ({_bot_type_ru(b.bot_type)}){platform_tag}\n"
             f"   Статус: {_bot_status_badge(b)}\n"
             f"   Создан: {_format_ru_date(b.created_at)}\n"
             f"   Запросов: {_format_num(req_count)}"
