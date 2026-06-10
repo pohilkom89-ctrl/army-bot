@@ -54,6 +54,7 @@ COPY usage_reporter.py /app/usage_reporter.py
 COPY system_prompt.txt /app/system_prompt.txt
 COPY greeting.txt /app/greeting.txt
 COPY blacklist.txt /app/blacklist.txt
+COPY webhook_url.txt /app/webhook_url.txt
 
 CMD ["python", "main.py"]
 """
@@ -75,11 +76,13 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
     bot_dir = _bot_dir(bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "main.py").write_text(bot_code, encoding="utf-8")
-    # greeting.txt and blacklist.txt must exist in build context (COPY in Dockerfile)
+    # greeting.txt, blacklist.txt, webhook_url.txt must exist in build context (COPY in Dockerfile)
     if not (bot_dir / "greeting.txt").exists():
         (bot_dir / "greeting.txt").write_text("", encoding="utf-8")
     if not (bot_dir / "blacklist.txt").exists():
         (bot_dir / "blacklist.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "webhook_url.txt").exists():
+        (bot_dir / "webhook_url.txt").write_text("", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -124,6 +127,13 @@ def write_bot_blacklist(bot_id: int, telegram_ids: list[int]) -> None:
     bot_dir.mkdir(parents=True, exist_ok=True)
     content = "\n".join(str(tid) for tid in telegram_ids)
     (bot_dir / "blacklist.txt").write_text(content, encoding="utf-8")
+
+
+def write_bot_webhook_url(bot_id: int, url: str) -> None:
+    """Write webhook_url.txt for the bot. Empty string disables the webhook."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "webhook_url.txt").write_text(url or "", encoding="utf-8")
 
 
 def write_bot_greeting(bot_id: int, greeting: str) -> None:

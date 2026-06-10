@@ -162,8 +162,10 @@ TEMPLATES: dict[str, BotTemplate] = {
 STANDARD_BOT_CODE = '''\
 import asyncio
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -189,11 +191,32 @@ BLACKLIST: set[int] = {
     int(line) for line in _blacklist_raw.splitlines() if line.strip().isdigit()
 }
 
+WEBHOOK_URL = Path("/app/webhook_url.txt").read_text(encoding="utf-8").strip()
+
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
     base_url="https://openrouter.ai/api/v1",
 )
 dp = Dispatcher()
+
+
+async def _fire_webhook(message: Message) -> None:
+    if not WEBHOOK_URL:
+        return
+    user = message.from_user
+    payload = {
+        "bot_id": os.getenv("BOT_ID", ""),
+        "telegram_id": user.id if user else None,
+        "username": user.username if user else None,
+        "first_name": user.first_name if user else None,
+        "text": message.text or "",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(WEBHOOK_URL, json=payload, timeout=aiohttp.ClientTimeout(total=5))
+    except Exception:
+        logger.warning("webhook POST failed url={}", WEBHOOK_URL)
 
 
 @dp.message(Command("start"))
@@ -206,6 +229,7 @@ async def cmd_start(message: Message) -> None:
 async def on_message(message: Message) -> None:
     if message.from_user and message.from_user.id in BLACKLIST:
         return
+    asyncio.create_task(_fire_webhook(message))
     try:
         asyncio.create_task(report_subscriber(message.from_user.id))
         response = await openai_client.chat.completions.create(

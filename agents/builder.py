@@ -40,6 +40,12 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * `BLACKLIST: set[int] = {int(line) for line in _blacklist_raw.splitlines() if line.strip().isdigit()}`
   * В каждом message-хендлере (кроме /start) в самом начале проверяй: `if message.from_user and message.from_user.id in BLACKLIST: return`
   * Файл `blacklist.txt` уже лежит в /app (может быть пустым)
+- Webhook для CRM-интеграции:
+  * `WEBHOOK_URL = Path("/app/webhook_url.txt").read_text(encoding="utf-8").strip()`
+  * Если WEBHOOK_URL не пустой, в каждом message-хендлере (кроме /start) до LLM-вызова делай fire-and-forget: `asyncio.create_task(_fire_webhook(message))`
+  * `_fire_webhook` POST'ит JSON с полями: bot_id, telegram_id, username, first_name, text, timestamp (ISO)
+  * Используй `aiohttp.ClientSession` с timeout=5с, ловь все исключения через logger.warning (не падай)
+  * Файл `webhook_url.txt` уже лежит в /app (может быть пустым — тогда webhook отключён)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота

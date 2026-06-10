@@ -40,6 +40,7 @@ from deployer import (
     stop_bot,
     write_bot_greeting,
     write_bot_blacklist,
+    write_bot_webhook_url,
 )
 from db.repository import (
     anonymize_user,
@@ -203,6 +204,7 @@ class EditStates(StatesGroup):
     waiting_scripts = State()
     waiting_greeting = State()
     waiting_rename = State()
+    waiting_webhook = State()
 
 
 class PaymentStates(StatesGroup):
@@ -2795,6 +2797,12 @@ def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🔗 Webhook",
+                    callback_data=f"bot:edit_webhook:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="🏷 Переименовать",
                     callback_data=f"bot:edit_name:{bot_id}",
                 )
@@ -3339,6 +3347,66 @@ async def on_blacklist_id(message: Message, state: FSMContext) -> None:
         logger.exception("on_blacklist_id: redeploy failed bot_id={}", bot_id)
         await message.answer(
             f"🚫 {telegram_id} добавлен в настройки.\n"
+            "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
+        )
+
+
+@router.callback_query(F.data.startswith("bot:edit_webhook:"))
+async def cb_bot_edit_webhook(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:edit_webhook:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    current_url = (bot_cfg.config_json or {}).get("webhook_url", "") if bot_cfg else ""
+    hint = f"\nТекущий URL: {current_url}" if current_url else "\nWebhook не настроен."
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите URL для webhook (https://...) — бот будет POST'ить каждое сообщение туда.\n"
+            "Чтобы отключить — пришлите «-»." + hint
+        )
+    await state.set_state(EditStates.waiting_webhook)
+    await state.update_data(edit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(EditStates.waiting_webhook)
+async def on_edit_webhook(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пришлите URL или «-» чтобы отключить.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("edit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    url = "" if text == "-" else text
+    if url and not url.startswith(("http://", "https://")):
+        await message.answer("URL должен начинаться с http:// или https://. Попробуйте ещё раз.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(bot_id, client.id, "webhook_url", url)
+    if not ok:
+        await state.clear()
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    await state.clear()
+    try:
+        await asyncio.to_thread(write_bot_webhook_url, bot_id, url)
+        await redeploy_bot(bot_id)
+        if url:
+            await message.answer(f"🔗 Webhook сохранён и бот перезапущен.\nURL: {url}")
+        else:
+            await message.answer("🔗 Webhook отключён и бот перезапущен.")
+    except Exception:
+        logger.exception("on_edit_webhook: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            "🔗 Webhook сохранён в настройках.\n"
             "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
         )
 
