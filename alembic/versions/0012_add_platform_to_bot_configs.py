@@ -7,8 +7,8 @@ Create Date: 2026-06-10
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0012"
-down_revision = "0011"
+revision = "0012_add_platform_to_bot_configs"
+down_revision = "0011_add_bot_messages"
 branch_labels = None
 depends_on = None
 
