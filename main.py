@@ -42,6 +42,7 @@ from deployer import (
     write_bot_blacklist,
     write_bot_webhook_url,
     write_bot_triggers,
+    write_bot_rate_limit,
 )
 from db.repository import (
     anonymize_user,
@@ -233,6 +234,10 @@ class BlacklistStates(StatesGroup):
 class TriggerStates(StatesGroup):
     waiting_keyword = State()
     waiting_response = State()
+
+
+class RateLimitStates(StatesGroup):
+    waiting_limit = State()
 
 
 class CloneStates(StatesGroup):
@@ -2858,6 +2863,12 @@ def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🛡 Лимит сообщений",
+                    callback_data=f"bot:rate_limit:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="🏷 Переименовать",
                     callback_data=f"bot:edit_name:{bot_id}",
                 )
@@ -3600,6 +3611,66 @@ async def cb_trigger_remove(callback: CallbackQuery) -> None:
         await callback.answer("Удалён из настроек. Перезапуск не удался.")
     if callback.message is not None:
         await callback.message.delete()
+
+
+@router.callback_query(F.data.startswith("bot:rate_limit:"))
+async def cb_bot_rate_limit(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:rate_limit:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    current = (bot_cfg.config_json or {}).get("rate_limit_per_hour", 0) if bot_cfg else 0
+    hint = f"Текущий лимит: {current} сообщений/час." if current else "Лимит не задан (нет ограничений)."
+    if callback.message is not None:
+        await callback.message.answer(
+            f"🛡 Лимит сообщений на пользователя\n{hint}\n\n"
+            "Введите максимальное количество сообщений в час (число от 1 до 1000).\n"
+            "Чтобы отключить лимит — введите 0."
+        )
+    await state.set_state(RateLimitStates.waiting_limit)
+    await state.update_data(rate_limit_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(RateLimitStates.waiting_limit)
+async def on_rate_limit(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужно целое число (например: 30). Попробуйте ещё раз.")
+        return
+    value = int(text)
+    if value > 1000:
+        await message.answer("Максимум 1000 сообщений/час. Введите число от 0 до 1000.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("rate_limit_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await update_bot_config(bot_id, client.id, "rate_limit_per_hour", value)
+    await state.clear()
+    if not ok:
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    try:
+        await asyncio.to_thread(write_bot_rate_limit, bot_id, value)
+        await redeploy_bot(bot_id)
+        if value:
+            await message.answer(f"🛡 Лимит {value} сообщений/час сохранён и бот перезапущен.")
+        else:
+            await message.answer("🛡 Лимит отключён и бот перезапущен.")
+    except Exception:
+        logger.exception("on_rate_limit: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            "🛡 Лимит сохранён в настройках.\n"
+            "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
+        )
 
 
 @router.callback_query(F.data.startswith("bot:edit_name:"))

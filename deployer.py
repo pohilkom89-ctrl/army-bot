@@ -56,6 +56,7 @@ COPY greeting.txt /app/greeting.txt
 COPY blacklist.txt /app/blacklist.txt
 COPY webhook_url.txt /app/webhook_url.txt
 COPY triggers.json /app/triggers.json
+COPY rate_limit.txt /app/rate_limit.txt
 
 CMD ["python", "main.py"]
 """
@@ -86,6 +87,8 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
         (bot_dir / "webhook_url.txt").write_text("", encoding="utf-8")
     if not (bot_dir / "triggers.json").exists():
         (bot_dir / "triggers.json").write_text("{}", encoding="utf-8")
+    if not (bot_dir / "rate_limit.txt").exists():
+        (bot_dir / "rate_limit.txt").write_text("0", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -130,6 +133,13 @@ def write_bot_blacklist(bot_id: int, telegram_ids: list[int]) -> None:
     bot_dir.mkdir(parents=True, exist_ok=True)
     content = "\n".join(str(tid) for tid in telegram_ids)
     (bot_dir / "blacklist.txt").write_text(content, encoding="utf-8")
+
+
+def write_bot_rate_limit(bot_id: int, max_per_hour: int) -> None:
+    """Write rate_limit.txt for the bot. 0 means disabled."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "rate_limit.txt").write_text(str(max(0, max_per_hour)), encoding="utf-8")
 
 
 def write_bot_triggers(bot_id: int, triggers: dict[str, str]) -> None:

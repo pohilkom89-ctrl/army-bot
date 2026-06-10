@@ -166,6 +166,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import json as _json
+import time
 
 import aiohttp
 from aiogram import Bot, Dispatcher
@@ -195,6 +196,22 @@ BLACKLIST: set[int] = {
 
 WEBHOOK_URL = Path("/app/webhook_url.txt").read_text(encoding="utf-8").strip()
 TRIGGERS: dict[str, str] = _json.loads(Path("/app/triggers.json").read_text(encoding="utf-8"))
+RATE_LIMIT_MAX: int = int(Path("/app/rate_limit.txt").read_text(encoding="utf-8").strip() or "0")
+_RATE_WINDOW = 3600  # 1 hour sliding window
+_rate_counters: dict[int, list[float]] = {}
+
+
+def _is_rate_limited(telegram_id: int) -> bool:
+    if RATE_LIMIT_MAX <= 0:
+        return False
+    now = time.time()
+    times = [t for t in _rate_counters.get(telegram_id, []) if now - t < _RATE_WINDOW]
+    if len(times) >= RATE_LIMIT_MAX:
+        _rate_counters[telegram_id] = times
+        return True
+    times.append(now)
+    _rate_counters[telegram_id] = times
+    return False
 
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -231,6 +248,8 @@ async def cmd_start(message: Message) -> None:
 @dp.message()
 async def on_message(message: Message) -> None:
     if message.from_user and message.from_user.id in BLACKLIST:
+        return
+    if message.from_user and _is_rate_limited(message.from_user.id):
         return
     asyncio.create_task(_fire_webhook(message))
     user = message.from_user

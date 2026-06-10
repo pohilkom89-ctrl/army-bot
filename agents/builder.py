@@ -51,6 +51,13 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * `TRIGGERS: dict[str, str] = _json.loads(Path("/app/triggers.json").read_text(encoding="utf-8"))`
   * В каждом message-хендлере (кроме /start) ПОСЛЕ проверки blacklist: перебери TRIGGERS, если `keyword.lower() in text.lower()` — ответь response и `return` (не идёт в LLM)
   * Файл `triggers.json` уже лежит в /app (может быть `{}` — тогда триггеры отключены)
+- Лимит сообщений на пользователя (anti-spam):
+  * `import time`
+  * `RATE_LIMIT_MAX: int = int(Path("/app/rate_limit.txt").read_text(encoding="utf-8").strip() or "0")`
+  * Скользящее окно 3600с: `_rate_counters: dict[int, list[float]] = {}`
+  * Функция `_is_rate_limited(telegram_id) -> bool`: если RATE_LIMIT_MAX <= 0 — False; иначе очищай устаревшие метки, если len >= max — True, иначе добавляй метку и False
+  * В каждом message-хендлере (кроме /start) ПОСЛЕ blacklist: `if message.from_user and _is_rate_limited(message.from_user.id): return`
+  * Файл `rate_limit.txt` уже лежит в /app (0 = отключён)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота
