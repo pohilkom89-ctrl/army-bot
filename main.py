@@ -43,6 +43,7 @@ from deployer import (
     write_bot_webhook_url,
     write_bot_triggers,
     write_bot_rate_limit,
+    write_bot_quick_replies,
 )
 from db.repository import (
     anonymize_user,
@@ -97,6 +98,8 @@ from db.repository import (
     get_triggers,
     set_trigger,
     remove_trigger,
+    get_quick_replies,
+    set_quick_replies,
 )
 from pipeline import (
     _token_accumulator,
@@ -238,6 +241,10 @@ class TriggerStates(StatesGroup):
 
 class RateLimitStates(StatesGroup):
     waiting_limit = State()
+
+
+class QuickReplyStates(StatesGroup):
+    waiting_button = State()
 
 
 class CloneStates(StatesGroup):
@@ -2869,6 +2876,12 @@ def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="📋 Кнопки быстрых ответов",
+                    callback_data=f"bot:quick_replies:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="🏷 Переименовать",
                     callback_data=f"bot:edit_name:{bot_id}",
                 )
@@ -3671,6 +3684,168 @@ async def on_rate_limit(message: Message, state: FSMContext) -> None:
             "🛡 Лимит сохранён в настройках.\n"
             "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
         )
+
+
+@router.callback_query(F.data.startswith("bot:quick_replies:"))
+async def cb_bot_quick_replies(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:quick_replies:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    buttons = await get_quick_replies(bot_id, client_id)
+    if buttons is None:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+    if not buttons:
+        text = "📋 Кнопки быстрых ответов не заданы."
+    else:
+        listed = "\n".join(f"{i+1}. {b}" for i, b in enumerate(buttons))
+        text = f"📋 Кнопки быстрых ответов:\n{listed}"
+    rows = [
+        [InlineKeyboardButton(
+            text=f"❌ {b}",
+            callback_data=f"bot:qr_remove:{bot_id}:{i}",
+        )]
+        for i, b in enumerate(buttons)
+    ]
+    rows.append([InlineKeyboardButton(
+        text="➕ Добавить кнопку",
+        callback_data=f"bot:qr_add:{bot_id}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="◀️ Назад",
+        callback_data=f"bot:edit_menu:{bot_id}",
+    )])
+    if callback.message is not None:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:qr_add:"))
+async def cb_quick_reply_add(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:qr_add:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Введите текст кнопки (не более 64 символов).\n/cancel чтобы отменить."
+        )
+    await state.set_state(QuickReplyStates.waiting_button)
+    await state.update_data(qr_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(QuickReplyStates.waiting_button)
+async def on_quick_reply_button(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    text = (message.text or "").strip()
+    if text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+    if len(text) > 64:
+        await message.answer("Слишком длинный текст. Максимум 64 символа. Попробуйте ещё раз.")
+        return
+    if not text:
+        await message.answer("Текст не может быть пустым. Введите текст кнопки.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("qr_bot_id")
+    if bot_id is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    buttons = await get_quick_replies(bot_id, client.id) or []
+    if len(buttons) >= 10:
+        await state.clear()
+        await message.answer("Максимум 10 кнопок. Удалите ненужные через меню.")
+        return
+    buttons.append(text)
+    ok = await set_quick_replies(bot_id, client.id, buttons)
+    await state.clear()
+    if not ok:
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    try:
+        await asyncio.to_thread(write_bot_quick_replies, bot_id, buttons)
+        await redeploy_bot(bot_id)
+        await message.answer(f'📋 Кнопка «{text}» добавлена и бот перезапущен.')
+    except Exception:
+        logger.exception("on_quick_reply_button: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            f'📋 Кнопка «{text}» сохранена в настройках.\n'
+            "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
+        )
+
+
+@router.callback_query(F.data.startswith("bot:qr_remove:"))
+async def cb_quick_reply_remove(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+    try:
+        bot_id = int(parts[2])
+        idx = int(parts[3])
+    except ValueError:
+        await callback.answer("Неверные данные.", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    buttons = await get_quick_replies(bot_id, client.id)
+    if buttons is None:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+    if idx < 0 or idx >= len(buttons):
+        await callback.answer("Кнопка не найдена.", show_alert=True)
+        return
+    removed = buttons.pop(idx)
+    ok = await set_quick_replies(bot_id, client.id, buttons)
+    if not ok:
+        await callback.answer("Ошибка сохранения.", show_alert=True)
+        return
+    try:
+        await asyncio.to_thread(write_bot_quick_replies, bot_id, buttons)
+        await redeploy_bot(bot_id)
+        await callback.answer(f'Кнопка «{removed}» удалена.')
+    except Exception:
+        logger.exception("cb_quick_reply_remove: redeploy failed bot_id={}", bot_id)
+        await callback.answer(f'Кнопка «{removed}» удалена (перезапуск при следующем деплое).')
+    if callback.message is not None:
+        if not buttons:
+            text = "📋 Кнопки быстрых ответов не заданы."
+        else:
+            listed = "\n".join(f"{i+1}. {b}" for i, b in enumerate(buttons))
+            text = f"📋 Кнопки быстрых ответов:\n{listed}"
+        rows = [
+            [InlineKeyboardButton(
+                text=f"❌ {b}",
+                callback_data=f"bot:qr_remove:{bot_id}:{i}",
+            )]
+            for i, b in enumerate(buttons)
+        ]
+        rows.append([InlineKeyboardButton(
+            text="➕ Добавить кнопку",
+            callback_data=f"bot:qr_add:{bot_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"bot:edit_menu:{bot_id}",
+        )])
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @router.callback_query(F.data.startswith("bot:edit_name:"))

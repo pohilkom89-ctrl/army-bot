@@ -171,7 +171,7 @@ import time
 import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from loguru import logger
 from openai import AsyncOpenAI
 from usage_reporter import report_message, report_subscriber, report_usage
@@ -197,6 +197,18 @@ BLACKLIST: set[int] = {
 WEBHOOK_URL = Path("/app/webhook_url.txt").read_text(encoding="utf-8").strip()
 TRIGGERS: dict[str, str] = _json.loads(Path("/app/triggers.json").read_text(encoding="utf-8"))
 RATE_LIMIT_MAX: int = int(Path("/app/rate_limit.txt").read_text(encoding="utf-8").strip() or "0")
+QUICK_REPLIES: list[str] = _json.loads(Path("/app/quick_replies.json").read_text(encoding="utf-8"))
+
+
+def _make_reply_keyboard() -> ReplyKeyboardMarkup | ReplyKeyboardRemove:
+    if not QUICK_REPLIES:
+        return ReplyKeyboardRemove()
+    rows = [QUICK_REPLIES[i:i + 2] for i in range(0, len(QUICK_REPLIES), 2)]
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=btn) for btn in row] for row in rows],
+        resize_keyboard=True,
+        persistent=True,
+    )
 _RATE_WINDOW = 3600  # 1 hour sliding window
 _rate_counters: dict[int, list[float]] = {}
 
@@ -263,7 +275,7 @@ async def _fire_webhook(message: Message) -> None:
 async def cmd_start(message: Message) -> None:
     asyncio.create_task(report_subscriber(message.from_user.id))
     _clear_history(message.from_user.id)
-    await message.answer(GREETING)
+    await message.answer(GREETING, reply_markup=_make_reply_keyboard())
 
 
 @dp.message(Command("reset"))

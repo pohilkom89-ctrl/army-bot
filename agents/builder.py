@@ -66,6 +66,12 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * В message-хендлере: append user message → build messages=[system]+history → LLM → append assistant reply
   * При ошибке LLM — откатывай последний user message из истории
   * В `messages` для LLM: `[{"role": "system", "content": SYSTEM_PROMPT}] + _get_history(user.id)`
+- Кнопки быстрых ответов:
+  * `from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove`
+  * `QUICK_REPLIES: list[str] = json.loads(Path("/app/quick_replies.json").read_text(encoding="utf-8"))`
+  * Функция `_make_reply_keyboard()`: если QUICK_REPLIES пустой — `ReplyKeyboardRemove()`, иначе — `ReplyKeyboardMarkup` с кнопками по 2 в ряд, `resize_keyboard=True, persistent=True`
+  * В `/start`: `await message.answer(GREETING, reply_markup=_make_reply_keyboard())`
+  * Файл `quick_replies.json` уже лежит в /app (может быть `[]` — тогда клавиатура скрыта)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота

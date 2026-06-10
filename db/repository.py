@@ -323,6 +323,39 @@ async def get_bot_owner_telegram_id(bot_id: int) -> int | None:
         return result.scalar_one_or_none()
 
 
+async def get_quick_replies(bot_id: int, client_id: int) -> list[str] | None:
+    """Return quick reply buttons list. None if not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return None
+        return list((bot.config_json or {}).get("quick_replies", []))
+
+
+async def set_quick_replies(bot_id: int, client_id: int, buttons: list[str]) -> bool:
+    """Save quick reply buttons list. Returns False if not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        cfg = dict(bot.config_json or {})
+        cfg["quick_replies"] = buttons
+        bot.config_json = cfg
+        return True
+
+
 async def get_triggers(bot_id: int, client_id: int) -> dict[str, str] | None:
     """Return trigger dict for a bot owned by client_id. None if not owner."""
     async with get_session() as session:
