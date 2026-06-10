@@ -91,6 +91,7 @@ from db.repository import (
     add_to_blacklist,
     remove_from_blacklist,
     get_subscribers_for_export,
+    get_bot_recent_conversations,
 )
 from pipeline import (
     _token_accumulator,
@@ -2246,6 +2247,12 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="💬 Диалоги",
+                    callback_data=f"bot:conversations:{bot.id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     text="📅 Расписание",
                     callback_data=f"bot:schedule:{bot.id}",
                 ),
@@ -2422,6 +2429,39 @@ async def cb_bot_export_subs(callback: CallbackQuery) -> None:
         await callback.message.answer_document(
             BufferedInputFile(buf.getvalue().encode("utf-8-sig"), filename=filename),
             caption=f"📥 {len(rows)} подписчиков",
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:conversations:"))
+async def cb_bot_conversations(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:conversations:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    msgs = await get_bot_recent_conversations(bot_id, client_id, limit=20)
+    if msgs is None:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+    if not msgs:
+        await callback.answer("Диалогов пока нет.", show_alert=True)
+        return
+    lines = ["💬 Последние диалоги (новые сверху)\n"]
+    for m in msgs:
+        ts = m["created_at"].strftime("%d.%m %H:%M") if m["created_at"] else ""
+        who = f"@{m['username']}" if m["username"] else f"ID {m['telegram_id']}"
+        icon = "👤" if m["role"] == "user" else "🤖"
+        text_preview = (m["text"] or "")[:120].replace("\n", " ")
+        if len(m["text"] or "") > 120:
+            text_preview += "…"
+        lines.append(f"{icon} {who} [{ts}]\n{text_preview}\n")
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")
+    ]])
+    if callback.message is not None:
+        await callback.message.answer(
+            "\n".join(lines),
+            reply_markup=back_kb,
         )
     await callback.answer()
 

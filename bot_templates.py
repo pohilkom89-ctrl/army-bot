@@ -171,7 +171,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from loguru import logger
 from openai import AsyncOpenAI
-from usage_reporter import report_subscriber, report_usage
+from usage_reporter import report_message, report_subscriber, report_usage
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -230,8 +230,10 @@ async def on_message(message: Message) -> None:
     if message.from_user and message.from_user.id in BLACKLIST:
         return
     asyncio.create_task(_fire_webhook(message))
+    user = message.from_user
+    asyncio.create_task(report_message(user.id, user.username, "user", message.text or ""))
     try:
-        asyncio.create_task(report_subscriber(message.from_user.id))
+        asyncio.create_task(report_subscriber(user.id))
         response = await openai_client.chat.completions.create(
             model=MODEL,
             max_tokens=2048,
@@ -241,9 +243,11 @@ async def on_message(message: Message) -> None:
             ],
         )
         asyncio.create_task(report_usage(response.usage, MODEL))
-        await message.answer(response.choices[0].message.content or "")
+        reply = response.choices[0].message.content or ""
+        asyncio.create_task(report_message(user.id, user.username, "bot", reply))
+        await message.answer(reply)
     except Exception:
-        logger.exception("on_message failed for user_id={}", message.from_user.id)
+        logger.exception("on_message failed for user_id={}", user.id)
         await message.answer("Произошла ошибка. Попробуйте ещё раз.")
 
 

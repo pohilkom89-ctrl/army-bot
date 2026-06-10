@@ -26,6 +26,7 @@ _BOT_ID = int(_BOT_ID_RAW) if _BOT_ID_RAW.isdigit() else None
 _TIMEOUT = aiohttp.ClientTimeout(total=5)
 _ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/log_tokens"
 _SUBSCRIBER_ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/track_subscriber"
+_MESSAGE_ENDPOINT = f"{_FACTORY_URL.rstrip('/')}/internal/log_message"
 
 
 async def report_usage(usage: Any, model: str) -> None:
@@ -77,3 +78,24 @@ async def report_subscriber(telegram_id: int) -> None:
             await session.post(_SUBSCRIBER_ENDPOINT, json=payload, headers=headers)
     except Exception as e:
         logger.warning("usage_reporter: subscriber POST failed — {}", e)
+
+
+async def report_message(
+    telegram_id: int, username: str | None, role: str, text: str
+) -> None:
+    """Fire-and-forget: send a conversation message to the factory for owner viewing."""
+    if _BOT_ID is None or not _INTERNAL_API_KEY:
+        return
+    payload = {
+        "bot_id": _BOT_ID,
+        "telegram_id": telegram_id,
+        "username": username,
+        "role": role,
+        "text": text[:2000],
+    }
+    headers = {"X-Internal-Key": _INTERNAL_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+            await session.post(_MESSAGE_ENDPOINT, json=payload, headers=headers)
+    except Exception as e:
+        logger.warning("usage_reporter: message POST failed — {}", e)

@@ -238,6 +238,24 @@ class ScheduledBroadcast(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
+class BotMessage(Base):
+    __tablename__ = "bot_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bot_id = Column(
+        Integer,
+        ForeignKey("bot_configs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    telegram_id = Column(BigInteger, nullable=False, index=True)
+    username = Column(String(64), nullable=True)
+    # "user" or "bot"
+    role = Column(String(8), nullable=False)
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class TokenLog(Base):
     __tablename__ = "token_logs"
 

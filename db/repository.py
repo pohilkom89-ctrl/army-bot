@@ -8,6 +8,7 @@ from config import BUSINESS_SOFT_CAP, PLANS, TRIAL_DAYS
 from db.database import get_session
 from db.models import (
     BotConfig,
+    BotMessage,
     BotSubscriber,
     ChatHistory,
     Client,
@@ -1581,3 +1582,78 @@ async def remove_from_blacklist(bot_id: int, client_id: int, telegram_id: int) -
         cfg["blacklist"] = bl
         bot.config_json = cfg
         return True
+
+
+# ---------------------------------------------------------------------------
+# Bot messages (conversation log from generated bots)
+# ---------------------------------------------------------------------------
+
+_MAX_MESSAGES_PER_BOT = 500
+
+
+async def log_bot_message(
+    bot_id: int,
+    telegram_id: int,
+    username: str | None,
+    role: str,
+    text: str,
+) -> None:
+    """Persist a message from a generated bot's conversation.
+    Keeps only the last _MAX_MESSAGES_PER_BOT rows per bot to cap DB growth."""
+    async with get_session() as session:
+        session.add(BotMessage(
+            bot_id=bot_id,
+            telegram_id=telegram_id,
+            username=username,
+            role=role,
+            text=text[:2000],
+        ))
+        await session.flush()
+        # Prune oldest rows beyond cap
+        cutoff_id = await session.scalar(
+            select(BotMessage.id)
+            .where(BotMessage.bot_id == bot_id)
+            .order_by(BotMessage.id.desc())
+            .offset(_MAX_MESSAGES_PER_BOT - 1)
+            .limit(1)
+        )
+        if cutoff_id is not None:
+            await session.execute(
+                BotMessage.__table__.delete().where(
+                    BotMessage.bot_id == bot_id,
+                    BotMessage.id < cutoff_id,
+                )
+            )
+
+
+async def get_bot_recent_conversations(
+    bot_id: int, client_id: int, limit: int = 20
+) -> list[dict] | None:
+    """Return last `limit` messages for the bot, newest first.
+    Returns None if client doesn't own the bot."""
+    async with get_session() as session:
+        owned = await session.scalar(
+            select(BotConfig.id).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if owned is None:
+            return None
+        result = await session.execute(
+            select(BotMessage)
+            .where(BotMessage.bot_id == bot_id)
+            .order_by(BotMessage.created_at.desc())
+            .limit(limit)
+        )
+        rows = list(result.scalars().all())
+    return [
+        {
+            "telegram_id": r.telegram_id,
+            "username": r.username,
+            "role": r.role,
+            "text": r.text,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
