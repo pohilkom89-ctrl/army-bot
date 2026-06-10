@@ -37,6 +37,7 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir \\
     aiogram==3.13.0 \\
+    vkbottle==4.3.15 \\
     openai==2.31.0 \\
     loguru==0.7.3 \\
     python-dotenv==1.0.1 \\
@@ -50,6 +51,7 @@ RUN pip install --no-cache-dir \\
     beautifulsoup4==4.12.3
 
 COPY main.py /app/main.py
+COPY vk_main.py /app/vk_main.py
 COPY usage_reporter.py /app/usage_reporter.py
 COPY system_prompt.txt /app/system_prompt.txt
 COPY greeting.txt /app/greeting.txt
@@ -484,3 +486,119 @@ def _logs_sync(bot_id: int, lines: int) -> str:
     except Exception:
         logger.exception("deployer: logs fetch failed for bot_id={}", bot_id)
         return ""
+
+
+# ---------------------------------------------------------------------------
+# VK bot deploy helpers
+# ---------------------------------------------------------------------------
+
+def prepare_vk_bot_files(bot_id: int, system_prompt: str) -> Path:
+    """Prepare build context for a VK bot. Uses vk_main.py as entrypoint."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    _write_system_prompt(bot_dir, system_prompt)
+    if not (bot_dir / "greeting.txt").exists():
+        (bot_dir / "greeting.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "blacklist.txt").exists():
+        (bot_dir / "blacklist.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "webhook_url.txt").exists():
+        (bot_dir / "webhook_url.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "triggers.json").exists():
+        (bot_dir / "triggers.json").write_text("{}", encoding="utf-8")
+    if not (bot_dir / "rate_limit.txt").exists():
+        (bot_dir / "rate_limit.txt").write_text("0", encoding="utf-8")
+    if not (bot_dir / "quick_replies.json").exists():
+        (bot_dir / "quick_replies.json").write_text("[]", encoding="utf-8")
+    # Write a stub main.py so Dockerfile COPY doesn't fail; VK bots use vk_main.py
+    if not (bot_dir / "main.py").exists():
+        (bot_dir / "main.py").write_text("# vk bot placeholder\n", encoding="utf-8")
+    _write_dockerfile(bot_id)
+    _ensure_runtime_files(bot_dir)
+    # Copy vk_main.py into build context
+    vk_src = RUNTIME_DIR / "vk_main.py"
+    if not vk_src.exists():
+        raise FileNotFoundError(f"deployer: {vk_src} missing — cannot build VK bot images")
+    shutil.copy2(vk_src, bot_dir / "vk_main.py")
+    logger.info("deployer: prepared VK files for bot_id={}", bot_id)
+    return bot_dir
+
+
+async def deploy_vk_bot(bot_id: int) -> str:
+    """Deploy a VK community bot. Uses vk_main.py entrypoint instead of main.py."""
+    bot = await get_bot_by_id_any(bot_id)
+    if bot is None:
+        raise RuntimeError(f"deployer: no BotConfig for bot_id={bot_id}")
+    vk_token = bot.bot_token
+    if not vk_token:
+        raise RuntimeError(f"deployer: bot_token (VK_TOKEN) empty for bot_id={bot_id}")
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    if not openrouter_key:
+        raise RuntimeError("OPENROUTER_API_KEY is required to deploy bots")
+    model_bots = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
+    internal_api_key = os.getenv("INTERNAL_API_KEY")
+    if not internal_api_key:
+        raise RuntimeError("INTERNAL_API_KEY is required to deploy bots")
+    factory_url = os.getenv("FACTORY_URL", "http://host.docker.internal:8080")
+    system_prompt = bot.system_prompt or ""
+
+    return await asyncio.to_thread(
+        _deploy_vk_sync,
+        bot_id,
+        vk_token,
+        openrouter_key,
+        model_bots,
+        factory_url,
+        internal_api_key,
+        system_prompt,
+    )
+
+
+def _deploy_vk_sync(
+    bot_id: int,
+    vk_token: str,
+    openrouter_key: str,
+    model_bots: str,
+    factory_url: str,
+    internal_api_key: str,
+    system_prompt: str,
+) -> str:
+    bot_dir = _bot_dir(bot_id)
+    name = _container_name(bot_id)
+
+    if docker.container.exists(name):
+        state = _container_state(name)
+        if state == "running":
+            logger.info("deployer: VK {} already running — noop", name)
+            return _container_id(name)
+        if state in ("exited", "created"):
+            docker.container.start(name)
+            return _container_id(name)
+        docker.container.remove(name, force=True)
+
+    _write_system_prompt(bot_dir, system_prompt)
+    build_bot_image(bot_dir, bot_id)
+    tag = _image_tag(bot_id)
+    logger.info("deployer: starting VK container {}", name)
+    container = docker.run(
+        image=tag,
+        name=name,
+        detach=True,
+        restart="unless-stopped",
+        cpus=CONTAINER_CPU_LIMIT,
+        memory=CONTAINER_MEMORY_LIMIT,
+        add_hosts=[("host.docker.internal", "host-gateway")],
+        # Override CMD to use vk_main.py
+        command=["python", "vk_main.py"],
+        envs={
+            "VK_TOKEN": vk_token,
+            "BOT_ID": str(bot_id),
+            "OPENROUTER_API_KEY": openrouter_key,
+            "OPENROUTER_MODEL_BOTS": model_bots,
+            "FACTORY_URL": factory_url,
+            "INTERNAL_API_KEY": internal_api_key,
+        },
+    )
+    container_id = getattr(container, "id", str(container))
+    logger.info("deployer: VK container {} started (id={})", name, container_id)
+    return container_id

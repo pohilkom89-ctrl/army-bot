@@ -75,6 +75,8 @@ class BotConfig(Base):
     bot_name = Column(String(128), nullable=False)
     # parser | seller | content | support
     bot_type = Column(String(32), nullable=False)
+    # "telegram" (default) | "vk"
+    platform = Column(String(16), nullable=False, default="telegram", server_default="telegram")
     bot_token = Column(String(128), nullable=False)
     system_prompt = Column(Text, nullable=False)
     config_json = Column(JSON, nullable=False, default=dict)
