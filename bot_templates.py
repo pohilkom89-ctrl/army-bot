@@ -165,6 +165,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import json as _json
+
 import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -192,6 +194,7 @@ BLACKLIST: set[int] = {
 }
 
 WEBHOOK_URL = Path("/app/webhook_url.txt").read_text(encoding="utf-8").strip()
+TRIGGERS: dict[str, str] = _json.loads(Path("/app/triggers.json").read_text(encoding="utf-8"))
 
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -231,6 +234,11 @@ async def on_message(message: Message) -> None:
         return
     asyncio.create_task(_fire_webhook(message))
     user = message.from_user
+    text_lower = (message.text or "").lower()
+    for keyword, response in TRIGGERS.items():
+        if keyword.lower() in text_lower:
+            await message.answer(response)
+            return
     asyncio.create_task(report_message(user.id, user.username, "user", message.text or ""))
     try:
         asyncio.create_task(report_subscriber(user.id))

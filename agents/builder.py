@@ -46,6 +46,11 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * `_fire_webhook` POST'ит JSON с полями: bot_id, telegram_id, username, first_name, text, timestamp (ISO)
   * Используй `aiohttp.ClientSession` с timeout=5с, ловь все исключения через logger.warning (не падай)
   * Файл `webhook_url.txt` уже лежит в /app (может быть пустым — тогда webhook отключён)
+- Триггеры по ключевым словам (без LLM):
+  * `import json as _json`
+  * `TRIGGERS: dict[str, str] = _json.loads(Path("/app/triggers.json").read_text(encoding="utf-8"))`
+  * В каждом message-хендлере (кроме /start) ПОСЛЕ проверки blacklist: перебери TRIGGERS, если `keyword.lower() in text.lower()` — ответь response и `return` (не идёт в LLM)
+  * Файл `triggers.json` уже лежит в /app (может быть `{}` — тогда триггеры отключены)
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота

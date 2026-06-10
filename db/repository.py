@@ -323,6 +323,63 @@ async def get_bot_owner_telegram_id(bot_id: int) -> int | None:
         return result.scalar_one_or_none()
 
 
+async def get_triggers(bot_id: int, client_id: int) -> dict[str, str] | None:
+    """Return trigger dict for a bot owned by client_id. None if not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return None
+        return dict((bot.config_json or {}).get("triggers", {}))
+
+
+async def set_trigger(bot_id: int, client_id: int, keyword: str, response: str) -> bool:
+    """Add or update a trigger. Returns False if not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        cfg = dict(bot.config_json or {})
+        triggers = dict(cfg.get("triggers", {}))
+        triggers[keyword] = response
+        cfg["triggers"] = triggers
+        bot.config_json = cfg
+        return True
+
+
+async def remove_trigger(bot_id: int, client_id: int, keyword: str) -> bool:
+    """Remove a trigger by keyword. Returns False if not found or not owner."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        bot = result.scalar_one_or_none()
+        if bot is None:
+            return False
+        cfg = dict(bot.config_json or {})
+        triggers = dict(cfg.get("triggers", {}))
+        if keyword not in triggers:
+            return False
+        del triggers[keyword]
+        cfg["triggers"] = triggers
+        bot.config_json = cfg
+        return True
+
+
 async def get_subscribers_for_export(
     bot_id: int, client_id: int
 ) -> list[dict] | None:

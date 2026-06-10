@@ -41,6 +41,7 @@ from deployer import (
     write_bot_greeting,
     write_bot_blacklist,
     write_bot_webhook_url,
+    write_bot_triggers,
 )
 from db.repository import (
     anonymize_user,
@@ -92,6 +93,9 @@ from db.repository import (
     remove_from_blacklist,
     get_subscribers_for_export,
     get_bot_recent_conversations,
+    get_triggers,
+    set_trigger,
+    remove_trigger,
 )
 from pipeline import (
     _token_accumulator,
@@ -224,6 +228,11 @@ class BroadcastStates(StatesGroup):
 
 class BlacklistStates(StatesGroup):
     waiting_id = State()
+
+
+class TriggerStates(StatesGroup):
+    waiting_keyword = State()
+    waiting_response = State()
 
 
 class CloneStates(StatesGroup):
@@ -2843,6 +2852,12 @@ def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="⚡ Триггеры",
+                    callback_data=f"bot:triggers:{bot_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="🏷 Переименовать",
                     callback_data=f"bot:edit_name:{bot_id}",
                 )
@@ -3449,6 +3464,142 @@ async def on_edit_webhook(message: Message, state: FSMContext) -> None:
             "🔗 Webhook сохранён в настройках.\n"
             "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
         )
+
+
+@router.callback_query(F.data.startswith("bot:triggers:"))
+async def cb_bot_triggers(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:triggers:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    triggers = await get_triggers(bot_id, client_id)
+    if triggers is None:
+        await callback.answer("Бот не найден.")
+        return
+    lines = [f"⚡ Триггеры бота (ID: {bot_id})"]
+    buttons: list[list[InlineKeyboardButton]] = []
+    if triggers:
+        lines.append("")
+        for kw, resp in triggers.items():
+            preview = resp[:40] + "…" if len(resp) > 40 else resp
+            lines.append(f"• {kw} → {preview}")
+            buttons.append([InlineKeyboardButton(
+                text=f"❌ Удалить «{kw}»",
+                callback_data=f"trigger:remove:{bot_id}:{kw}",
+            )])
+    else:
+        lines.append("\nТриггеров нет.")
+    buttons.append([InlineKeyboardButton(
+        text="➕ Добавить триггер",
+        callback_data=f"trigger:add:{bot_id}",
+    )])
+    buttons.append([InlineKeyboardButton(
+        text="◀️ Назад",
+        callback_data=f"bot:edit:{bot_id}",
+    )])
+    if callback.message is not None:
+        await callback.message.answer(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("trigger:add:"))
+async def cb_trigger_add(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _resolve_edit_target(callback, "trigger:add:")
+    if resolved is None:
+        return
+    bot_id, _ = resolved
+    if callback.message is not None:
+        await callback.message.answer(
+            "Пришлите ключевое слово (одно слово или фраза).\n"
+            "Пример: цена"
+        )
+    await state.set_state(TriggerStates.waiting_keyword)
+    await state.update_data(trigger_bot_id=bot_id)
+    await callback.answer()
+
+
+@router.message(TriggerStates.waiting_keyword)
+async def on_trigger_keyword(message: Message, state: FSMContext) -> None:
+    keyword = (message.text or "").strip()
+    if not keyword:
+        await message.answer("Пустое слово. Пришлите ключевое слово.")
+        return
+    if len(keyword) > 100:
+        await message.answer("Слово слишком длинное (макс. 100 символов).")
+        return
+    await state.update_data(trigger_keyword=keyword)
+    await state.set_state(TriggerStates.waiting_response)
+    await message.answer(f"Ключевое слово: «{keyword}»\nТеперь пришлите ответ бота на это слово.")
+
+
+@router.message(TriggerStates.waiting_response)
+async def on_trigger_response(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    response = (message.text or "").strip()
+    if not response:
+        await message.answer("Пустой ответ. Пришлите текст ответа.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("trigger_bot_id")
+    keyword = data.get("trigger_keyword")
+    if bot_id is None or keyword is None:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        return
+    client = await get_or_create_client(user.id, user.username)
+    ok = await set_trigger(bot_id, client.id, keyword, response)
+    await state.clear()
+    if not ok:
+        await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
+        return
+    triggers = await get_triggers(bot_id, client.id)
+    try:
+        await asyncio.to_thread(write_bot_triggers, bot_id, triggers or {})
+        await redeploy_bot(bot_id)
+        await message.answer(f"⚡ Триггер «{keyword}» сохранён и бот перезапущен.")
+    except Exception:
+        logger.exception("on_trigger_response: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            f"⚡ Триггер «{keyword}» сохранён в настройках.\n"
+            "⚠️ Не удалось перезапустить контейнер — изменение вступит в силу при следующем деплое."
+        )
+
+
+@router.callback_query(F.data.startswith("trigger:remove:"))
+async def cb_trigger_remove(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    # format: trigger:remove:{bot_id}:{keyword}
+    raw = (callback.data or "").removeprefix("trigger:remove:")
+    colon = raw.index(":")
+    try:
+        bot_id = int(raw[:colon])
+    except ValueError:
+        await callback.answer("Некорректные данные.")
+        return
+    keyword = raw[colon + 1:]
+    client = await get_or_create_client(user.id, user.username)
+    removed = await remove_trigger(bot_id, client.id, keyword)
+    if not removed:
+        await callback.answer("Триггер не найден.")
+        return
+    triggers = await get_triggers(bot_id, client.id)
+    try:
+        await asyncio.to_thread(write_bot_triggers, bot_id, triggers or {})
+        await redeploy_bot(bot_id)
+        await callback.answer(f"✅ «{keyword}» удалён, бот перезапущен.")
+    except Exception:
+        logger.exception("cb_trigger_remove: redeploy failed bot_id={}", bot_id)
+        await callback.answer("Удалён из настроек. Перезапуск не удался.")
+    if callback.message is not None:
+        await callback.message.delete()
 
 
 @router.callback_query(F.data.startswith("bot:edit_name:"))

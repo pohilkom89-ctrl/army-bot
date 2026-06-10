@@ -55,6 +55,7 @@ COPY system_prompt.txt /app/system_prompt.txt
 COPY greeting.txt /app/greeting.txt
 COPY blacklist.txt /app/blacklist.txt
 COPY webhook_url.txt /app/webhook_url.txt
+COPY triggers.json /app/triggers.json
 
 CMD ["python", "main.py"]
 """
@@ -83,6 +84,8 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
         (bot_dir / "blacklist.txt").write_text("", encoding="utf-8")
     if not (bot_dir / "webhook_url.txt").exists():
         (bot_dir / "webhook_url.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "triggers.json").exists():
+        (bot_dir / "triggers.json").write_text("{}", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -127,6 +130,16 @@ def write_bot_blacklist(bot_id: int, telegram_ids: list[int]) -> None:
     bot_dir.mkdir(parents=True, exist_ok=True)
     content = "\n".join(str(tid) for tid in telegram_ids)
     (bot_dir / "blacklist.txt").write_text(content, encoding="utf-8")
+
+
+def write_bot_triggers(bot_id: int, triggers: dict[str, str]) -> None:
+    """Write triggers.json for the bot. Keys are keywords, values are responses."""
+    import json as _json
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "triggers.json").write_text(
+        _json.dumps(triggers, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def write_bot_webhook_url(bot_id: int, url: str) -> None:
