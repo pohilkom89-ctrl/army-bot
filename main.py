@@ -102,6 +102,7 @@ from db.repository import (
     remove_trigger,
     get_quick_replies,
     set_quick_replies,
+    get_engagement_funnel,
 )
 from pipeline import (
     _token_accumulator,
@@ -2590,9 +2591,10 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
         return
     bot_id, client_id = resolved
     bot_cfg = await get_bot_by_id(bot_id, client_id)
-    analytics, sub_stats = await asyncio.gather(
+    analytics, sub_stats, funnel = await asyncio.gather(
         get_bot_analytics(bot_id, client_id),
         get_subscriber_stats(bot_id, client_id),
+        get_engagement_funnel(bot_id, client_id),
     )
     if bot_cfg is None or analytics is None:
         await callback.answer("Бот не найден", show_alert=True)
@@ -2611,10 +2613,27 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
             f"   За 30 дней: +{_format_num(sub_stats['new_30d'])}\n"
         )
 
+    funnel_section = ""
+    if funnel:
+        subs = funnel["subscribers"]
+        msg = funnel["messaged"]
+        ret = funnel["returned"]
+        act = funnel["active_7d"]
+        def _pct(num: int, denom: int) -> str:
+            return f"{round(num / denom * 100)}%" if denom else "—"
+        funnel_section = (
+            f"\n🔻 Воронка вовлечённости\n"
+            f"   Подписчики: {_format_num(subs)}\n"
+            f"   ↓ Написали хоть раз: {_format_num(msg)} ({_pct(msg, subs)})\n"
+            f"   ↓ Вернулись (2+ дней): {_format_num(ret)} ({_pct(ret, msg)})\n"
+            f"   ↓ Активны (7 дн): {_format_num(act)} ({_pct(act, subs)})\n"
+        )
+
     text = (
         f"📊 Аналитика — {bot_cfg.bot_name}\n"
-        f"{sub_section}\n"
-        f"💬 Диалоги\n"
+        f"{sub_section}"
+        f"{funnel_section}\n"
+        f"💬 Диалоги (/chat)\n"
         f"   Уникальных пользователей: {_format_num(analytics['unique_users'])}\n"
         f"   Всего сообщений: {_format_num(analytics['total_messages'])}\n"
         f"   За 7 дней: {_format_num(analytics['messages_7d'])}\n"

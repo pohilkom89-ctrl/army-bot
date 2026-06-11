@@ -1538,6 +1538,69 @@ async def get_subscriber_stats(bot_id: int, client_id: int) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Engagement funnel (Wave 26)
+# ---------------------------------------------------------------------------
+
+async def get_engagement_funnel(bot_id: int, client_id: int) -> dict | None:
+    """Engagement funnel for real end-users of a deployed bot (BotMessage).
+
+    Returns None if the bot is not owned by this client. Fields:
+    - subscribers: all-time BotSubscriber count
+    - messaged: distinct end-users who sent >= 1 message
+    - returned: distinct end-users who messaged on 2+ different calendar days
+    - active_7d: distinct end-users who sent a message in the last 7 days
+    """
+    async with get_session() as session:
+        bot_result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if bot_result.scalar_one_or_none() is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        user_msgs = [BotMessage.bot_id == bot_id, BotMessage.role == "user"]
+
+        subscribers = await session.scalar(
+            select(func.count(BotSubscriber.id)).where(BotSubscriber.bot_id == bot_id)
+        )
+
+        messaged = await session.scalar(
+            select(func.count(func.distinct(BotMessage.telegram_id))).where(*user_msgs)
+        )
+
+        # Users who messaged on >= 2 distinct calendar days
+        returned_subq = (
+            select(BotMessage.telegram_id)
+            .where(*user_msgs)
+            .group_by(BotMessage.telegram_id)
+            .having(
+                func.count(func.distinct(func.date(BotMessage.created_at))) >= 2
+            )
+            .subquery()
+        )
+        returned = await session.scalar(
+            select(func.count()).select_from(returned_subq)
+        )
+
+        active_7d = await session.scalar(
+            select(func.count(func.distinct(BotMessage.telegram_id))).where(
+                *user_msgs,
+                BotMessage.created_at >= now - timedelta(days=7),
+            )
+        )
+
+        return {
+            "subscribers": int(subscribers or 0),
+            "messaged": int(messaged or 0),
+            "returned": int(returned or 0),
+            "active_7d": int(active_7d or 0),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Scheduled broadcasts
 # ---------------------------------------------------------------------------
 
