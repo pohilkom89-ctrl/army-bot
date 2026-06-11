@@ -2203,6 +2203,7 @@ _BOT_TYPE_RU: dict[str, str] = {
     "content": "Контент",
     "support": "Поддержка",
     "merged": "Объединённый",
+    "custom": "Произвольный",
 }
 
 
