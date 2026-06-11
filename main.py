@@ -2901,12 +2901,17 @@ async def cb_bot_resume(callback: CallbackQuery) -> None:
     if not ok:
         await callback.answer("Бот не найден", show_alert=True)
         return
-    # deploy_bot is idempotent — fast-starts an existing stopped container
-    # or rebuilds from scratch if it was removed.
+    # deploy_bot/deploy_vk_bot are idempotent — fast-start an existing stopped
+    # container or rebuild from scratch if it was removed.
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    _platform = getattr(bot_cfg, "platform", "telegram") if bot_cfg else "telegram"
     try:
-        await deploy_bot(bot_id)
+        if _platform == "vk":
+            await deploy_vk_bot(bot_id)
+        else:
+            await deploy_bot(bot_id)
     except Exception:
-        logger.exception("mybots: deploy_bot failed bot_id={}", bot_id)
+        logger.exception("mybots: deploy failed bot_id={} platform={}", bot_id, _platform)
         if callback.message is not None:
             await callback.message.answer(
                 "⚠️ Статус в БД обновлён на «активен», но контейнер не стартовал. "
@@ -2927,83 +2932,28 @@ _EDIT_STYLES = (
 )
 
 
-def _edit_menu_keyboard(bot_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📝 Системный промпт",
-                    callback_data=f"bot:edit_prompt:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎨 Имя и стиль",
-                    callback_data=f"bot:edit_style:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🚫 Запреты",
-                    callback_data=f"bot:edit_forbidden:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📜 Скрипты",
-                    callback_data=f"bot:edit_scripts:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💬 Приветствие",
-                    callback_data=f"bot:edit_greeting:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🚫 Чёрный список",
-                    callback_data=f"bot:blacklist:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔗 Webhook",
-                    callback_data=f"bot:edit_webhook:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⚡ Триггеры",
-                    callback_data=f"bot:triggers:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🛡 Лимит сообщений",
-                    callback_data=f"bot:rate_limit:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Кнопки быстрых ответов",
-                    callback_data=f"bot:quick_replies:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🏷 Переименовать",
-                    callback_data=f"bot:edit_name:{bot_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="◀️ Назад",
-                    callback_data=f"bot:manage:{bot_id}",
-                )
-            ],
-        ]
-    )
+def _edit_menu_keyboard(bot_id: int, platform: str = "telegram") -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="📝 Системный промпт", callback_data=f"bot:edit_prompt:{bot_id}")],
+        [InlineKeyboardButton(text="🎨 Имя и стиль", callback_data=f"bot:edit_style:{bot_id}")],
+        [InlineKeyboardButton(text="🚫 Запреты", callback_data=f"bot:edit_forbidden:{bot_id}")],
+        [InlineKeyboardButton(text="📜 Скрипты", callback_data=f"bot:edit_scripts:{bot_id}")],
+        [InlineKeyboardButton(text="💬 Приветствие", callback_data=f"bot:edit_greeting:{bot_id}")],
+        [InlineKeyboardButton(text="🚫 Чёрный список", callback_data=f"bot:blacklist:{bot_id}")],
+        [InlineKeyboardButton(text="🔗 Webhook", callback_data=f"bot:edit_webhook:{bot_id}")],
+        [InlineKeyboardButton(text="⚡ Триггеры", callback_data=f"bot:triggers:{bot_id}")],
+        [InlineKeyboardButton(text="🛡 Лимит сообщений", callback_data=f"bot:rate_limit:{bot_id}")],
+    ]
+    if platform != "vk":
+        rows.append([InlineKeyboardButton(
+            text="📋 Кнопки быстрых ответов",
+            callback_data=f"bot:quick_replies:{bot_id}",
+        )])
+    rows += [
+        [InlineKeyboardButton(text="🏷 Переименовать", callback_data=f"bot:edit_name:{bot_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _resolve_edit_target(
@@ -3037,9 +2987,10 @@ async def cb_bot_edit(callback: CallbackQuery) -> None:
     bot_id, client_id = resolved
     bot_cfg = await get_bot_by_id(bot_id, client_id)
     if callback.message is not None and bot_cfg is not None:
+        platform = getattr(bot_cfg, "platform", "telegram")
         await callback.message.answer(
             f"🤖 {bot_cfg.bot_name} — что редактируем?",
-            reply_markup=_edit_menu_keyboard(bot_id),
+            reply_markup=_edit_menu_keyboard(bot_id, platform=platform),
         )
     await callback.answer()
 
