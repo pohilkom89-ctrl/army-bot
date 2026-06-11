@@ -82,7 +82,7 @@ TRIAL_DAYS: int = 7
 
 # Referral reward: days added to the referrer's subscription when a referred
 # user makes their first paid subscription purchase.
-REFERRAL_REWARD_DAYS: int = 30
+REFERRAL_REWARD_DAYS: int = 14
 
 
 # Multi-LLM routing — model tiers used by run_bot_query and agents/router.py.

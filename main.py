@@ -26,7 +26,7 @@ from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
 
 from billing import create_payment
-from config import BUSINESS_SOFT_CAP, MODELS, MODEL_STRATEGIES, PLANS, is_admin
+from config import BUSINESS_SOFT_CAP, MODELS, MODEL_STRATEGIES, PLANS, REFERRAL_REWARD_DAYS, is_admin
 from db.database import get_session, init_db  # noqa: F401
 from bot_templates import STANDARD_BOT_CODE, TEMPLATES, get_template
 from deployer import (
@@ -1885,7 +1885,7 @@ _ONBOARDING_PAGES = [
         (
             "Приглашайте коллег — получайте бонусы!\n\n"
             "За каждого друга, который оформит подписку:\n"
-            "➕ +30 дней Про добавляется к вашей подписке\n\n"
+            f"➕ +{REFERRAL_REWARD_DAYS} дней Про добавляется к вашей подписке\n\n"
             "Количество рефералов не ограничено.\n"
             "Уведомление приходит автоматически, как только друг оплатит.\n\n"
             "/referral — получить вашу реферальную ссылку\n\n"
@@ -4971,7 +4971,7 @@ async def cmd_referral(message: Message) -> None:
     lines = [
         "🤝 Реферальная программа",
         "",
-        "Приглашайте друзей — получайте +30 дней Про за каждого, кто оформит подписку.",
+        f"Приглашайте друзей — получайте +{REFERRAL_REWARD_DAYS} дней Про за каждого, кто оформит подписку.",
         "",
         f"Ваша ссылка:\n{link}",
         "",
