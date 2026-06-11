@@ -959,12 +959,14 @@ async def get_referral_stats(client_id: int) -> dict:
         }
 
 
-async def apply_pending_referral_reward(referee_client_id: int) -> bool:
+async def apply_pending_referral_reward(referee_client_id: int) -> int | None:
     """Called after a payment completes. If this client was referred and the
     reward hasn't been sent yet, extend the referrer's subscription by
     REFERRAL_REWARD_DAYS and mark reward as sent.
 
-    Returns True if a reward was applied.
+    Returns the referrer's telegram_id if a reward was applied, None otherwise.
+    The return value is truthy on success so existing ``if reward_applied:``
+    callers keep working.
     """
     from config import REFERRAL_REWARD_DAYS
 
@@ -977,10 +979,10 @@ async def apply_pending_referral_reward(referee_client_id: int) -> bool:
         )
         row = result.one_or_none()
         if row is None:
-            return False
+            return None
         referrer_id, reward_sent = row
         if referrer_id is None or reward_sent:
-            return False
+            return None
 
         # Extend referrer's active subscription or create a reward subscription
         sub = await _active_subscription(session, referrer_id, now)
@@ -1017,7 +1019,12 @@ async def apply_pending_referral_reward(referee_client_id: int) -> bool:
             .where(Client.id == referee_client_id)
             .values(referral_reward_sent=True)
         )
-        return True
+
+        # Return referrer's telegram_id for push notification
+        tg_result = await session.execute(
+            select(Client.telegram_id).where(Client.id == referrer_id)
+        )
+        return tg_result.scalar_one_or_none()
 
 
 async def check_and_update_tokens(client_id: int, tokens_needed: int) -> bool:

@@ -48,7 +48,8 @@ def test_edit_menu_row_count_telegram_vs_vk():
     from main import _edit_menu_keyboard
     kb_tg = _edit_menu_keyboard(1, platform="telegram")
     kb_vk = _edit_menu_keyboard(1, platform="vk")
-    assert len(kb_vk.inline_keyboard) == len(kb_tg.inline_keyboard) - 1
+    # VK hides quick_replies + avatar (2 Telegram-only buttons)
+    assert len(kb_vk.inline_keyboard) == len(kb_tg.inline_keyboard) - 2
 
 
 # --- cb_bot_resume dispatches to deploy_vk_bot for VK ---

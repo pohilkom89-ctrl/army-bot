@@ -1811,52 +1811,156 @@ async def on_template_token(message: Message, state: FSMContext) -> None:
 
 
 
+_ONBOARDING_PAGES = [
+    (
+        "🏠 ArmyBots — фабрика AI-ботов (1/6)",
+        (
+            "ArmyBots создаёт готового AI-бота за ~60 секунд — без кода:\n\n"
+            "• Telegram или ВКонтакте\n"
+            "• Персональный AI (GPT / Gemini / Qwen)\n"
+            "• Системный промпт под вашу нишу\n"
+            "• 14 типов ботов: поддержка, продажи, HR, коучинг, недвижимость...\n"
+            "• Работает в Docker — вы просто управляете через Telegram\n\n"
+            "Листайте дальше — покажу как это работает."
+        ),
+    ),
+    (
+        "🤖 Создание бота (2/6)",
+        (
+            "Создать бота очень просто:\n\n"
+            "1️⃣ Нажмите ➕ Создать бота или /start\n"
+            "2️⃣ Выберите тип бота (поддержка, продажи, HR...)\n"
+            "3️⃣ Ответьте на 5–7 вопросов об вашем бизнесе\n"
+            "4️⃣ Создайте бота через @BotFather → получите токен\n"
+            "5️⃣ Вставьте токен — бот готов и запущен!\n\n"
+            "Для VK-бота: нажмите «🔵 Создать VK-бота» и введите токен сообщества.\n\n"
+            "💡 Хотите быстрее? /templates — готовые боты в 2 клика."
+        ),
+    ),
+    (
+        "⚙️ Управление ботом (3/6)",
+        (
+            "Все боты — в /mybots. Нажмите ✏️ Редактировать:\n\n"
+            "📝 Системный промпт — суть и характер бота\n"
+            "💬 Приветствие — первое сообщение подписчику\n"
+            "⚡ Триггеры — авто-ответы по ключевым словам\n"
+            "📋 Кнопки быстрых ответов — меню для пользователей\n"
+            "🛡 Лимит сообщений — защита от спама\n"
+            "🔗 Webhook — интеграция с CRM\n\n"
+            "📢 Рассылки по расписанию — жмите «Рассылка» в карточке бота.\n"
+            "⏸ Пауза / ▶️ Возобновить — моментальный контроль работы."
+        ),
+    ),
+    (
+        "📚 Знания и AI-чат (4/6)",
+        (
+            "Сделайте бота экспертом в вашей теме:\n\n"
+            "📥 /teach — загрузить текст, FAQ, документы\n"
+            "Бот отвечает, опираясь на вашу базу знаний (RAG).\n\n"
+            "📋 /knowledge — посмотреть загруженные источники\n\n"
+            "💬 /chat — протестировать бота лично перед запуском\n\n"
+            "🎨 /image — сгенерировать картинку через FusionBrain\n\n"
+            "🎙 Голосовые сообщения — бот транскрибирует через Whisper\n"
+            "📷 Фото — бот описывает изображения через Gemini Vision"
+        ),
+    ),
+    (
+        "💎 Тарифы и пробный период (5/6)",
+        (
+            "Выберите тариф под ваши задачи:\n\n"
+            "🟢 Starter — 490₽/мес\n"
+            "   1 Telegram-бот, 1М токенов\n\n"
+            "🔵 Pro — 949₽/мес\n"
+            "   2 простых + 2 комбо-бота, 5М токенов\n\n"
+            "🟣 Business — 2 990₽/мес\n"
+            "   5+3 бота, ~50М токенов\n\n"
+            "🎁 Пробный период: 7 дней Про — бесплатно\n"
+            "   Активируется автоматически при первом боте!\n\n"
+            "/subscribe — оформить или продлить подписку"
+        ),
+    ),
+    (
+        "🤝 Реферальная программа (6/6)",
+        (
+            "Приглашайте коллег — получайте бонусы!\n\n"
+            "За каждого друга, который оформит подписку:\n"
+            "➕ +30 дней Про добавляется к вашей подписке\n\n"
+            "Количество рефералов не ограничено.\n"
+            "Уведомление приходит автоматически, как только друг оплатит.\n\n"
+            "/referral — получить вашу реферальную ссылку\n\n"
+            "—\n"
+            "Команды: /mybots /usage /settings /subscribe /chat /teach\n"
+            "Данные: /my_data /delete_my_data /revoke_consent"
+        ),
+    ),
+]
+
+_HELP_TOTAL = len(_ONBOARDING_PAGES)
+
+
+def _help_page_keyboard(page: int) -> InlineKeyboardMarkup:
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"help:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{_HELP_TOTAL}", callback_data="help:noop"))
+    if page < _HELP_TOTAL - 1:
+        nav.append(InlineKeyboardButton(text="Далее ▶️", callback_data=f"help:page:{page + 1}"))
+    rows = [nav]
+    if page == _HELP_TOTAL - 1:
+        rows.append([InlineKeyboardButton(text="✅ Понятно, начать!", callback_data="help:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    """Show the command index. Doubles as the entry-point for
-    re-installing the persistent main menu if the user managed to
-    dismiss it. Adds a hint when the client has no bots yet."""
     user = message.from_user
     if user is None:
         return
     is_admin_user = is_admin(user.id)
-
-    lines = [
-        "📋 ArmyBots — фабрика Telegram-ботов",
-        "",
-        "🤖 /mybots — список ваших ботов",
-        "💬 /chat — пообщаться с ИИ",
-        "📚 /teach — загрузить знания для бота",
-        "📊 /usage — статистика токенов",
-        "⚙️ /settings — настройки бота",
-        "💎 /subscribe — выбор тарифа",
-        "➕ /start — создать нового бота",
-        "📋 /templates — готовые шаблоны ботов (быстрый старт)",
-        "🤝 /referral — реферальная программа (+30 дней Про за друга)",
-        "",
-        "🔒 /my_data — ваши данные в системе",
-        "🗑 /delete_my_data — удалить все данные",
-        "📄 /revoke_consent — отозвать согласие на обработку ПДн",
-    ]
-
     client = await get_or_create_client(user.id, user.username)
     bots = await get_client_bots(client.id)
-    if not bots:
-        lines.extend(
-            [
-                "",
-                "У вас пока нет ботов. Нажмите ➕ Создать бота чтобы начать.",
-            ]
-        )
-    else:
-        lines.extend(
-            ["", "Используйте кнопки внизу или вводите команды."]
-        )
-
+    # New users land on page 1 (how to create), returning users on page 0.
+    start_page = 1 if not bots else 0
+    title, body = _ONBOARDING_PAGES[start_page]
     await message.answer(
-        "\n".join(lines),
+        f"<b>{title}</b>\n\n{body}",
+        parse_mode="HTML",
+        reply_markup=_help_page_keyboard(start_page),
+    )
+    await message.answer(
+        "Главное меню восстановлено.",
         reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
     )
+
+
+@router.callback_query(F.data.startswith("help:page:"))
+async def cb_help_page(callback: CallbackQuery) -> None:
+    try:
+        page = int((callback.data or "").split(":")[-1])
+    except ValueError:
+        await callback.answer()
+        return
+    page = max(0, min(page, _HELP_TOTAL - 1))
+    title, body = _ONBOARDING_PAGES[page]
+    if callback.message is not None:
+        await callback.message.edit_text(
+            f"<b>{title}</b>\n\n{body}",
+            parse_mode="HTML",
+            reply_markup=_help_page_keyboard(page),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "help:noop")
+async def cb_help_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data == "help:close")
+async def cb_help_close(callback: CallbackQuery) -> None:
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Туториал закрыт. /help чтобы открыть снова.")
 
 
 @router.callback_query(F.data.startswith("subscribe:"))
@@ -2949,6 +3053,10 @@ def _edit_menu_keyboard(bot_id: int, platform: str = "telegram") -> InlineKeyboa
             text="📋 Кнопки быстрых ответов",
             callback_data=f"bot:quick_replies:{bot_id}",
         )])
+        rows.append([InlineKeyboardButton(
+            text="🖼 Сгенерировать аватарку",
+            callback_data=f"bot:set_avatar:{bot_id}",
+        )])
     rows += [
         [InlineKeyboardButton(text="🏷 Переименовать", callback_data=f"bot:edit_name:{bot_id}")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")],
@@ -3051,6 +3159,93 @@ async def on_edit_prompt(message: Message, state: FSMContext) -> None:
     )
     await message.answer("✅ Системный промпт обновлён. /mybots")
     await _redeploy_after_edit(bot_id, message)
+
+
+# --- Wave 25: bot avatar via FusionBrain ---
+
+_AVATAR_PROMPT_BY_TYPE = {
+    "support":        "customer support AI assistant, headset, friendly robot, minimalist flat icon",
+    "seller":         "sales AI bot, shopping bag, ecommerce robot, minimalist flat icon",
+    "content":        "content creator AI bot, pen and star, creative robot, minimalist flat icon",
+    "parser":         "data parser AI bot, magnifying glass, analytics robot, minimalist flat icon",
+    "service_orders": "service orders AI bot, wrench and gear, handyman robot, minimalist flat icon",
+    "coach":          "life coach AI bot, lightbulb and person, motivational robot, minimalist flat icon",
+    "creative":       "creative AI bot, paint palette, artistic robot, minimalist flat icon",
+    "planner":        "planner AI bot, calendar and checkmark, organizer robot, minimalist flat icon",
+    "edu":            "education AI bot, graduation cap and book, teacher robot, minimalist flat icon",
+    "hr":             "HR AI bot, people and briefcase, recruiter robot, minimalist flat icon",
+    "quiz":           "quiz AI bot, question mark and trophy, game show robot, minimalist flat icon",
+    "real_estate":    "real estate AI bot, house and key, property robot, minimalist flat icon",
+    "events":         "events AI bot, calendar and confetti, organizer robot, minimalist flat icon",
+    "finance":        "finance AI bot, coins and chart, money robot, minimalist flat icon",
+}
+
+
+def _avatar_prompt(bot) -> str:
+    base = _AVATAR_PROMPT_BY_TYPE.get(
+        bot.bot_type,
+        "AI chatbot robot, minimalist flat icon",
+    )
+    return f"{base}, blue and white color scheme, square format, professional"
+
+
+@router.callback_query(F.data.startswith("bot:set_avatar:"))
+async def cb_bot_set_avatar(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:set_avatar:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    await callback.answer()
+    if callback.message is None:
+        return
+
+    if not image_generator.enabled:
+        await callback.message.answer(
+            "⚠️ Генерация изображений отключена (FusionBrain ключи не заданы)."
+        )
+        return
+
+    await callback.message.answer("⏳ Генерирую аватарку через FusionBrain (~30 сек)...")
+
+    prompt = _avatar_prompt(bot_cfg)
+    img_bytes = await image_generator.generate(prompt, width=512, height=512)
+
+    if img_bytes is None:
+        await callback.message.answer(
+            "⚠️ Не удалось сгенерировать изображение. Попробуйте позже."
+        )
+        return
+
+    from aiogram import Bot as _TempBot
+    set_ok = False
+    try:
+        async with _TempBot(token=bot_cfg.bot_token) as temp_bot:
+            await temp_bot.set_my_photo(
+                photo=BufferedInputFile(img_bytes, filename="avatar.png")
+            )
+        set_ok = True
+    except Exception:
+        logger.exception("avatar: set_my_photo failed for bot_id={}", bot_id)
+
+    if set_ok:
+        await callback.message.answer_photo(
+            BufferedInputFile(img_bytes, filename="avatar.png"),
+            caption="✅ Аватарка установлена! Может появиться в Telegram с небольшой задержкой.",
+        )
+    else:
+        await callback.message.answer_photo(
+            BufferedInputFile(img_bytes, filename="avatar.png"),
+            caption=(
+                "⚠️ Изображение сгенерировано, но установить не удалось.\n"
+                "Возможно токен бота недействителен или нет прав.\n"
+                "Вы можете сохранить фото вручную."
+            ),
+        )
 
 
 def _edit_style_keyboard(bot_id: int) -> InlineKeyboardMarkup:

@@ -85,7 +85,7 @@ async def test_apply_pending_referral_reward_no_referrer(fresh_db):
     from db.repository import apply_pending_referral_reward
     client = await _make_client(88030)
     result = await apply_pending_referral_reward(client.id)
-    assert result is False
+    assert result is None
 
 
 async def test_apply_pending_referral_reward_creates_sub_for_referrer(fresh_db):
@@ -99,7 +99,7 @@ async def test_apply_pending_referral_reward_creates_sub_for_referrer(fresh_db):
     await set_referred_by(referee.id, referrer.id)
 
     result = await apply_pending_referral_reward(referee.id)
-    assert result is True
+    assert result is not None  # returns referrer's telegram_id
 
     async with get_session() as session:
         sub = await session.scalar(
@@ -140,7 +140,7 @@ async def test_apply_pending_referral_reward_extends_existing_sub(fresh_db):
 
     await set_referred_by(referee.id, referrer.id)
     result = await apply_pending_referral_reward(referee.id)
-    assert result is True
+    assert result is not None  # returns referrer's telegram_id
 
     sub = await get_active_subscription(referrer.id)
     assert sub is not None
@@ -161,5 +161,5 @@ async def test_apply_pending_referral_reward_idempotent(fresh_db):
 
     result1 = await apply_pending_referral_reward(referee.id)
     result2 = await apply_pending_referral_reward(referee.id)
-    assert result1 is True
-    assert result2 is False
+    assert result1 is not None  # returns referrer's telegram_id on first apply
+    assert result2 is None      # already rewarded

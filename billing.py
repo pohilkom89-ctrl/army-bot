@@ -130,7 +130,21 @@ async def verify_payment_status(
     return actual == expected_status
 
 
-async def handle_webhook(data: dict[str, Any]) -> None:
+async def _notify_referral_reward(bot: Any, telegram_id: int) -> None:
+    """Push a Telegram message to the referrer when their reward is applied."""
+    from config import REFERRAL_REWARD_DAYS
+    try:
+        await bot.send_message(
+            telegram_id,
+            f"🎉 Ваш реферал оплатил подписку!\n"
+            f"+{REFERRAL_REWARD_DAYS} дней Про добавлено к вашей подписке.\n\n"
+            "Проверьте статус: /usage",
+        )
+    except Exception:
+        logger.exception("billing: referral reward notify failed tg_id={}", telegram_id)
+
+
+async def handle_webhook(data: dict[str, Any], bot: Any = None) -> None:
     event = data.get("event")
     obj = data.get("object") or {}
     payment_id = obj.get("id")
@@ -200,6 +214,12 @@ async def handle_webhook(data: dict[str, Any]) -> None:
         cycle,
         expires_at.isoformat(),
     )
-    reward_applied = await apply_pending_referral_reward(client_id)
-    if reward_applied:
-        logger.info("billing: referral reward applied for client_id={}", client_id)
+    referrer_tg_id = await apply_pending_referral_reward(client_id)
+    if referrer_tg_id:
+        logger.info(
+            "billing: referral reward applied for client_id={} referrer_tg_id={}",
+            client_id,
+            referrer_tg_id,
+        )
+        if bot is not None:
+            asyncio.create_task(_notify_referral_reward(bot, referrer_tg_id))

@@ -99,7 +99,7 @@ async def yukassa_webhook(request: web.Request) -> web.Response:
         )
 
     try:
-        await handle_webhook(data)
+        await handle_webhook(data, bot=request.app.get("bot"))
     except Exception:
         logger.exception("webhook: handler failed payment_id={}", payment_id)
         return web.Response(status=500, text="handler error")
