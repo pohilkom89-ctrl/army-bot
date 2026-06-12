@@ -150,6 +150,13 @@ def _build_consent_text() -> str:
 
 CONSENT_TEXT = _build_consent_text()
 
+WELCOME_TEXT = (
+    "👋 Добро пожаловать в ArmyBots!\n\n"
+    "Создайте Telegram или VK бота на AI за 5 минут — без кода.\n"
+    "Выберите тип, ответьте на вопросы — бот готов и работает 24/7.\n\n"
+    "Для продолжения нужно согласие на обработку персональных данных:"
+)
+
 # Commands that work even after consent is revoked (GDPR + re-consent flow).
 _CONSENT_EXEMPT = {"/start", "/revoke_consent", "/delete_my_data", "/my_data", "/help"}
 
@@ -314,8 +321,10 @@ def _bot_type_keyboard() -> InlineKeyboardMarkup:
 
 
 def _format_question(q: dict, idx: int, total: int) -> str:
+    filled = round(idx / total * 5)
+    bar = "■" * filled + "□" * (5 - filled)
     hint = f"\n💡 {q['hint']}" if q.get("hint") else ""
-    return f"Вопрос {idx}/{total}\n\n{q['text']}{hint}"
+    return f"[{bar}] Вопрос {idx}/{total}\n\n{q['text']}{hint}"
 
 
 def _bot_type_multiselect_keyboard(
@@ -518,6 +527,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
                 )
 
     await state.set_state(IntakeStates.consent)
+    await message.answer(WELCOME_TEXT)
     await message.answer(CONSENT_TEXT, reply_markup=_consent_keyboard())
 
 
@@ -605,8 +615,11 @@ async def on_bot_type_chosen(callback: CallbackQuery, state: FSMContext) -> None
     if key not in QUESTIONNAIRES:
         await callback.answer("Неизвестный тип", show_alert=True)
         return
+    spec = QUESTIONNAIRES[key]
     if callback.message is not None:
         await callback.message.edit_reply_markup(reply_markup=None)
+        if spec.get("example"):
+            await callback.message.answer(f"💡 Например: {spec['example']}")
     await _start_questionnaire(callback.message, state, [key])
     await callback.answer()
 
@@ -742,6 +755,13 @@ def _redact_sensitive(raw_answers: dict) -> tuple[dict, int]:
             }
     return llm_answers, sensitive_count
 
+
+_POST_CREATE_NEXT_STEPS = (
+    "Что дальше:\n"
+    "• /teach — загрузите базу знаний\n"
+    "• /chat — проверьте бота в деле\n"
+    "• /broadcast — настройте рассылку"
+)
 
 ASK_TOKEN_PROMPT = (
     "Отлично, все вопросы собраны!\n\n"
@@ -1055,7 +1075,8 @@ async def _run_pipeline_and_save(
         await message.answer(
             f"✅ {platform_label}-бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
             f"Контейнер: bot_client_{saved_bot.id}\n\n"
-            "Оформите подписку /subscribe чтобы открыть доступ клиентам.",
+            "Оформите подписку /subscribe чтобы открыть доступ клиентам.\n\n"
+            + _POST_CREATE_NEXT_STEPS,
             reply_markup=post_create_kb,
         )
     else:
