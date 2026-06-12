@@ -212,6 +212,30 @@ h1 .dim{color:var(--fg-dim)}
 .plan-note{text-align:center;margin-top:20px;font-size:13px;color:var(--fg-dim)}
 .plan-note strong{color:var(--fg)}
 
+/* ═══ BOT VS HUMAN ═══ */
+.vs-wrap{display:grid;grid-template-columns:1fr auto 1fr;gap:0;border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:20px}
+.vs-col{padding:28px 24px}
+.vs-bad{background:rgba(248,113,113,.04)}
+.vs-good{background:linear-gradient(140deg,rgba(99,102,241,.1),var(--bg-card) 60%);border-left:2px solid var(--accent)}
+.vs-head{font-size:16px;font-weight:800;margin-bottom:20px}
+.vs-badge{display:flex;align-items:center;justify-content:center;padding:0 20px;background:var(--bg-card);border-left:1px solid var(--border);border-right:1px solid var(--border);font-weight:900;font-size:13px;color:var(--fg-muted);writing-mode:vertical-rl;letter-spacing:.12em}
+.vs-item{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--border);font-size:14px}
+.vs-item:last-child{border-bottom:none}
+.vs-ico{font-size:16px;flex-shrink:0;margin-top:1px}
+.vs-item strong{display:block;margin-bottom:2px}
+.vs-item span{font-size:12px;color:var(--fg-muted)}
+.vs-bad .vs-item strong{color:var(--red)}
+.vs-good .vs-item strong{color:var(--green)}
+.stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.stat{text-align:center;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);padding:24px 12px}
+.stat-n{font-size:38px;font-weight:900;letter-spacing:-.03em;color:var(--accent);line-height:1}
+.stat-l{font-size:12px;color:var(--fg-dim);margin-top:8px;line-height:1.4}
+@media(max-width:768px){
+  .vs-wrap{grid-template-columns:1fr}
+  .vs-badge{writing-mode:horizontal-tb;padding:12px;border:none;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .stat-row{grid-template-columns:repeat(2,1fr)}
+}
+
 /* ═══ REVIEWS (hidden until real reviews appear) ═══ */
 /* To enable: change display:none to display:block on .reviews-section */
 .reviews-section{display:none}
@@ -289,17 +313,18 @@ footer{border-top:1px solid var(--border);padding:32px 0}
   <div class="wrap">
     <div class="hero-tag">✦ Telegram + VK · Серверы в России · 152-ФЗ</div>
     <h1>
-      Бот отвечает<br>
-      <span class="hi">клиентам 24/7</span><br>
-      <span class="dim">пока вы занимаетесь делом</span>
+      Один бот заменяет<br>
+      <span class="hi">менеджера по продажам</span><br>
+      <span class="dim">не болеет, не спит, не просит повышения</span>
     </h1>
-    <p class="hero-desc">Просто ответьте на вопросы анкеты — ИИ сам создаст, настроит и запустит готового бота. Без кода, без разработчика, за 5 минут.</p>
+    <p class="hero-desc">Ответьте на вопросы анкеты — ИИ создаст и запустит бота за 5 минут. Он будет отвечать клиентам вместо вас в 100 раз дешевле живого сотрудника.</p>
     <div class="hero-btns">
       <a href="https://t.me/ArmyBotsBot" class="btn btn-p btn-xl">Создать бота бесплатно →</a>
       <a href="#how" class="btn btn-g btn-lg">Как это работает</a>
     </div>
     <div class="chips">
       <span class="chip">7 дней Pro в подарок</span>
+      <span class="chip">В 100× дешевле менеджера</span>
       <span class="chip">Без технических знаний</span>
       <span class="chip">Запуск за 5 минут</span>
       <span class="chip">Данные хранятся в России</span>
@@ -338,6 +363,42 @@ footer{border-top:1px solid var(--border);padding:32px 0}
       <div class="pain-emoji">🤖</div>
       <h3 style="font-size:20px;margin-bottom:8px">ArmyBots решает всё три проблемы за 5 минут</h3>
       <p style="font-size:15px">Опишите свой бизнес — ИИ создаст персонального ассистента, который знает ваш продукт и отвечает вместо вас</p>
+    </div>
+  </div>
+</section>
+
+<!-- ───── BOT VS HUMAN ───── -->
+<section>
+  <div class="wrap">
+    <div class="tc">
+      <div class="label">Честная математика</div>
+      <h2>Бот vs Менеджер — считаем честно</h2>
+      <p class="sub">Для рутины — ответы на вопросы, приём заявок, поддержка — бот объективно лучше человека</p>
+    </div>
+    <div class="vs-wrap">
+      <div class="vs-col vs-bad">
+        <div class="vs-head">👤 Менеджер</div>
+        <div class="vs-item"><span class="vs-ico">😴</span><div><strong>8 часов в сутки</strong><span>Вечером и в выходные — молчит</span></div></div>
+        <div class="vs-item"><span class="vs-ico">🔄</span><div><strong>1 диалог одновременно</strong><span>Остальные клиенты ждут</span></div></div>
+        <div class="vs-item"><span class="vs-ico">💸</span><div><strong>от 50 000 ₽/мес</strong><span>Зарплата + налоги + отпуск + больничный</span></div></div>
+        <div class="vs-item"><span class="vs-ico">😤</span><div><strong>Устаёт, грубит, ошибается</strong><span>Человеческий фактор неизбежен</span></div></div>
+        <div class="vs-item"><span class="vs-ico">🚪</span><div><strong>Уходит — знания с собой</strong><span>Придётся обучать заново</span></div></div>
+      </div>
+      <div class="vs-badge">VS</div>
+      <div class="vs-col vs-good">
+        <div class="vs-head">🤖 ArmyBots</div>
+        <div class="vs-item"><span class="vs-ico">✅</span><div><strong>24/7 без перерывов</strong><span>Отвечает в 3 ночи, в воскресенье, в праздник</span></div></div>
+        <div class="vs-item"><span class="vs-ico">✅</span><div><strong>∞ диалогов параллельно</strong><span>Хоть 1000 клиентов одновременно</span></div></div>
+        <div class="vs-item"><span class="vs-ico">✅</span><div><strong>от 490 ₽/мес</strong><span>В 100× дешевле живого сотрудника</span></div></div>
+        <div class="vs-item"><span class="vs-ico">✅</span><div><strong>Всегда вежлив и точен</strong><span>По вашему скрипту, без отклонений</span></div></div>
+        <div class="vs-item"><span class="vs-ico">✅</span><div><strong>Знания остаются навсегда</strong><span>Обновите один раз — работает всегда</span></div></div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat"><div class="stat-n">100×</div><div class="stat-l">дешевле штатного менеджера</div></div>
+      <div class="stat"><div class="stat-n">24/7</div><div class="stat-l">без выходных и праздников</div></div>
+      <div class="stat"><div class="stat-n">∞</div><div class="stat-l">параллельных диалогов</div></div>
+      <div class="stat"><div class="stat-n">5 мин</div><div class="stat-l">до запуска вместо 4 недель</div></div>
     </div>
   </div>
 </section>
@@ -678,7 +739,7 @@ footer{border-top:1px solid var(--border);padding:32px 0}
         <div class="plan-mo">в месяц</div>
         <ul class="plan-list">
           <li><strong>1 бот</strong></li>
-          <li><strong>1 000 000</strong> токенов/мес</li>
+          <li>≈ <strong>500 диалогов</strong> в месяц</li>
           <li>Telegram и VK</li>
           <li>База знаний (RAG)</li>
           <li>Голосовые сообщения</li>
@@ -694,7 +755,7 @@ footer{border-top:1px solid var(--border);padding:32px 0}
         <div class="plan-mo">в месяц</div>
         <ul class="plan-list">
           <li><strong>2 бота</strong> + 2 мультитипа</li>
-          <li><strong>5 000 000</strong> токенов/мес</li>
+          <li>≈ <strong>2 500 диалогов</strong> в месяц</li>
           <li>Telegram и VK</li>
           <li>База знаний (RAG)</li>
           <li>Голосовые + анализ фото</li>
@@ -712,7 +773,7 @@ footer{border-top:1px solid var(--border);padding:32px 0}
         <div class="plan-mo">в месяц</div>
         <ul class="plan-list">
           <li><strong>5 ботов</strong> + 3 мультитипа</li>
-          <li><strong>50 000 000</strong> токенов/мес</li>
+          <li>≈ <strong>25 000 диалогов</strong> в месяц</li>
           <li>Всё из Pro</li>
           <li>Экспорт подписчиков CSV</li>
           <li>Расширенная аналитика</li>
