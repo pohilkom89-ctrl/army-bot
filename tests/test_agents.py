@@ -197,6 +197,23 @@ def test_analyst_classifies_hr(mock_run_agent):
     assert result["bot_type"] == "hr"
 
 
+def test_analyst_classifies_assistant(mock_run_agent):
+    """assistant must be a valid bot_type. Distinct from content (publishes
+    to audience), planner (task management), support (answers customers).
+    assistant creates work documents *for the bot owner* — KP, emails, reports."""
+    from agents.analyst import analyst_agent
+
+    payload = {**_VALID_REQUIREMENTS, "bot_type": "assistant"}
+    mock_run_agent.return_value = json.dumps(payload)
+    result = analyst_agent(
+        "Фрилансер-маркетолог, устал писать КП и отчёты вручную, "
+        "хочу бота который пишет коммерческие предложения, деловые письма "
+        "и отчёты о проделанной работе в моём стиле"
+    )
+
+    assert result["bot_type"] == "assistant"
+
+
 def test_analyst_prompt_enumerates_all_types():
     """Schema and the system prompt must agree on which bot_types exist —
     if they drift the LLM either invents a value the validator rejects
@@ -220,6 +237,7 @@ def test_analyst_prompt_enumerates_all_types():
         "real_estate",
         "events",
         "finance",
+        "assistant",
     }
     assert schema_types == expected, f"Schema drift: {schema_types ^ expected}"
 

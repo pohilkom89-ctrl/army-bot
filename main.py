@@ -3229,6 +3229,7 @@ _AVATAR_PROMPT_BY_TYPE = {
     "real_estate":    "real estate AI bot, house and key, property robot, minimalist flat icon",
     "events":         "events AI bot, calendar and confetti, organizer robot, minimalist flat icon",
     "finance":        "finance AI bot, coins and chart, money robot, minimalist flat icon",
+    "assistant":      "personal AI assistant bot, briefcase and pen, smart robot with tie, minimalist flat icon",
 }
 
 
