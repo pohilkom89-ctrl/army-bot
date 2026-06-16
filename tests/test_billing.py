@@ -166,6 +166,7 @@ async def test_handle_webhook_creates_subscription_for_new_payment(mocker):
         "billing.find_subscription_by_payment_id", return_value=None
     )
     mock_create = mocker.patch("billing.create_subscription")
+    mocker.patch("billing.apply_pending_referral_reward", return_value=None)
 
     from billing import handle_webhook
 

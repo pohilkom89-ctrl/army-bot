@@ -41,8 +41,13 @@ def test_all_questionnaires_have_example():
         assert len(spec["example"]) > 10, f"Empty example in QUESTIONNAIRES['{key}']"
 
 
-def test_post_create_next_steps_constant_has_commands():
-    from main import _POST_CREATE_NEXT_STEPS
-    assert "/teach" in _POST_CREATE_NEXT_STEPS
-    assert "/chat" in _POST_CREATE_NEXT_STEPS
-    assert "/broadcast" in _POST_CREATE_NEXT_STEPS
+def test_post_create_next_steps_has_commands():
+    from main import _post_create_next_steps
+    pro_text = _post_create_next_steps("pro")
+    assert "/teach" in pro_text
+    assert "/chat" in pro_text
+    assert "/broadcast" in pro_text
+    starter_text = _post_create_next_steps("starter")
+    assert "/teach" not in starter_text
+    assert "/chat" in starter_text
+    assert "/subscribe" in starter_text

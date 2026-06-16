@@ -756,12 +756,20 @@ def _redact_sensitive(raw_answers: dict) -> tuple[dict, int]:
     return llm_answers, sensitive_count
 
 
-_POST_CREATE_NEXT_STEPS = (
-    "Что дальше:\n"
-    "• /teach — загрузите базу знаний\n"
-    "• /chat — проверьте бота в деле\n"
-    "• /broadcast — настройте рассылку"
-)
+def _post_create_next_steps(tier: str) -> str:
+    if tier == "starter":
+        return (
+            "Что дальше:\n"
+            "• /chat — проверьте бота в деле\n"
+            "• /broadcast — настройте рассылку\n"
+            "• /subscribe — перейдите на Pro, чтобы добавить базу знаний"
+        )
+    return (
+        "Что дальше:\n"
+        "• /teach — загрузите базу знаний\n"
+        "• /chat — проверьте бота в деле\n"
+        "• /broadcast — настройте рассылку"
+    )
 
 ASK_TOKEN_PROMPT = (
     "Отлично, все вопросы собраны!\n\n"
@@ -1071,12 +1079,14 @@ async def _run_pipeline_and_save(
         ]
     )
     platform_label = "VK" if platform == "vk" else "Telegram"
+    sub = await get_active_subscription(client.id)
+    cur_tier = sub.tier if (sub and sub.status == "active") else "starter"
     if deploy_ok:
         await message.answer(
             f"✅ {platform_label}-бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
             f"Контейнер: bot_client_{saved_bot.id}\n\n"
             "Оформите подписку /subscribe чтобы открыть доступ клиентам.\n\n"
-            + _POST_CREATE_NEXT_STEPS,
+            + _post_create_next_steps(cur_tier),
             reply_markup=post_create_kb,
         )
     else:
@@ -4679,6 +4689,14 @@ async def cmd_teach(message: Message, state: FSMContext) -> None:
     if user is None:
         return
     client = await get_or_create_client(user.id, user.username)
+    sub = await get_active_subscription(client.id)
+    tier = sub.tier if (sub and sub.status == "active") else "starter"
+    if tier == "starter":
+        await message.answer(
+            "📚 База знаний (RAG) доступна на тарифах Pro и Business.\n"
+            "Перейдите на Pro — /subscribe"
+        )
+        return
     bot_cfg = await _active_bot(client.id)
     if bot_cfg is None:
         await message.answer(
@@ -4815,6 +4833,14 @@ async def cmd_knowledge(message: Message) -> None:
     if user is None:
         return
     client = await get_or_create_client(user.id, user.username)
+    sub = await get_active_subscription(client.id)
+    tier = sub.tier if (sub and sub.status == "active") else "starter"
+    if tier == "starter":
+        await message.answer(
+            "📚 База знаний (RAG) доступна на тарифах Pro и Business.\n"
+            "Перейдите на Pro — /subscribe"
+        )
+        return
     bot_cfg = await _active_bot(client.id)
     if bot_cfg is None:
         await message.answer(
