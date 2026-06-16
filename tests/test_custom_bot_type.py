@@ -46,3 +46,53 @@ def test_all_questionnaire_types_have_valid_structure():
         assert "name" in spec, f"{key}: missing name"
         assert "questions" in spec, f"{key}: missing questions"
         assert len(spec["questions"]) > 0, f"{key}: empty questions"
+
+
+import pytest
+
+
+async def test_custom_bot_blocked_for_starter(mocker):
+    """Starter tier must not be able to select the 'custom' bot type."""
+    alert_texts = []
+
+    mock_cb = mocker.AsyncMock()
+    mock_cb.data = "btype:custom"
+    mock_cb.from_user = mocker.MagicMock(id=42, username="user42")
+    mock_cb.answer = mocker.AsyncMock(side_effect=lambda text="", **kw: alert_texts.append(text))
+
+    mocker.patch("main.get_or_create_client", return_value=mocker.MagicMock(id=1))
+    mocker.patch(
+        "main.get_active_subscription",
+        return_value=mocker.MagicMock(tier="starter", status="active"),
+    )
+
+    from main import on_bot_type_chosen
+    from unittest.mock import MagicMock
+
+    state = mocker.AsyncMock()
+    await on_bot_type_chosen(mock_cb, state)
+
+    assert any("Pro" in t for t in alert_texts), "Expected Pro upsell message"
+    state.update_data.assert_not_called()
+
+
+async def test_custom_bot_allowed_for_pro(mocker):
+    """Pro tier must be able to proceed to questionnaire for 'custom' bot."""
+    mock_cb = mocker.AsyncMock()
+    mock_cb.data = "btype:custom"
+    mock_cb.from_user = mocker.MagicMock(id=42, username="user42")
+    mock_cb.message = mocker.AsyncMock()
+
+    mocker.patch("main.get_or_create_client", return_value=mocker.MagicMock(id=1))
+    mocker.patch(
+        "main.get_active_subscription",
+        return_value=mocker.MagicMock(tier="pro", status="active"),
+    )
+    mock_start = mocker.patch("main._start_questionnaire", new=mocker.AsyncMock())
+
+    from main import on_bot_type_chosen
+
+    state = mocker.AsyncMock()
+    await on_bot_type_chosen(mock_cb, state)
+
+    mock_start.assert_called_once()

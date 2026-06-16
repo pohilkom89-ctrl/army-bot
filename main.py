@@ -615,6 +615,17 @@ async def on_bot_type_chosen(callback: CallbackQuery, state: FSMContext) -> None
     if key not in QUESTIONNAIRES:
         await callback.answer("Неизвестный тип", show_alert=True)
         return
+    if key == "custom" and callback.from_user:
+        client = await get_or_create_client(callback.from_user.id, callback.from_user.username)
+        sub = await get_active_subscription(client.id)
+        tier = sub.tier if (sub and sub.status == "active") else "starter"
+        if tier == "starter":
+            await callback.answer(
+                "✨ Произвольный бот доступен на тарифе Pro и выше.\n"
+                "Используйте /subscribe для перехода.",
+                show_alert=True,
+            )
+            return
     spec = QUESTIONNAIRES[key]
     if callback.message is not None:
         await callback.message.edit_reply_markup(reply_markup=None)
