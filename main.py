@@ -11,6 +11,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import (
     BufferedInputFile,
@@ -104,6 +105,10 @@ from db.repository import (
     set_quick_replies,
     get_engagement_funnel,
 )
+from managed_bots import (
+    get_managed_bot_token as _get_managed_bot_token,
+    send_managed_bot_button as _send_managed_bot_button,
+)
 from pipeline import (
     _token_accumulator,
     merge_bots_prompt,
@@ -195,6 +200,68 @@ class ConsentGateMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class ManagedBotMiddleware(BaseMiddleware):
+    """Handle ManagedBotUpdated updates (Bot API 9.6) unknown to aiogram 3.13.
+
+    When a user taps the 'create bot automatically' keyboard button, Telegram
+    sends an update whose 'managed_bot' field aiogram stores in model_extra.
+    This middleware intercepts it, fetches the new bot's token via
+    getManagedBotToken, and continues the intake pipeline.
+    """
+
+    async def __call__(self, handler, event, data):
+        raw = getattr(event, "model_extra", None) or {}
+        managed = raw.get("managed_bot")
+        if managed is None:
+            return await handler(event, data)
+
+        creator_id: int = managed["user"]["id"]
+        bot_user_id: int = managed["bot_user"]["id"]
+        creator_username: str | None = managed["user"].get("username")
+
+        state_key = StorageKey(
+            bot_id=BOT_ID,
+            chat_id=creator_id,
+            user_id=creator_id,
+        )
+        fsm = FSMContext(storage=storage, key=state_key)
+        current = await fsm.get_state()
+
+        if current != IntakeStates.waiting_managed_bot.state:
+            logger.info(
+                "managed_bot: user {} ignored (state={})", creator_id, current
+            )
+            return
+
+        await fsm.set_state(IntakeStates.processing)
+
+        try:
+            new_token = await _get_managed_bot_token(BOT_TOKEN, bot_user_id)
+        except Exception:
+            logger.exception(
+                "managed_bot: token fetch failed for bot_user_id={}", bot_user_id
+            )
+            await bot.send_message(
+                creator_id,
+                "Не удалось получить токен автоматически. "
+                "Создайте бота в @BotFather и отправьте токен:",
+            )
+            await fsm.set_state(IntakeStates.ask_bot_token)
+            return
+
+        async def _send(text, **kw):
+            await bot.send_message(creator_id, text, **kw)
+
+        await _run_pipeline_core(
+            send_fn=_send,
+            user_id=creator_id,
+            username=creator_username,
+            state=fsm,
+            bot_token=new_token,
+            platform="telegram",
+        )
+
+
 class IntakeStates(StatesGroup):
     consent = State()
     ask_type = State()        # single-type (starter)
@@ -203,6 +270,7 @@ class IntakeStates(StatesGroup):
     answering = State()
     clarifying = State()
     ask_bot_token = State()
+    waiting_managed_bot = State()
     processing = State()
 
 
@@ -920,7 +988,18 @@ async def _goto_token_or_process(message: Message, state: FSMContext) -> None:
     if data.get("platform") == "vk":
         await state.set_state(IntakeStates.processing)
         await _run_pipeline_and_save(message, state, data["vk_token"], platform="vk")
-    else:
+        return
+
+    user = message.from_user
+    request_id = (user.id & 0x7FFFFFFF) or 1
+    await state.set_state(IntakeStates.waiting_managed_bot)
+    try:
+        await _send_managed_bot_button(BOT_TOKEN, user.id, request_id)
+    except Exception:
+        logger.warning(
+            "managed_bot: send_button failed for user {}, falling back to manual token",
+            user.id,
+        )
         await state.set_state(IntakeStates.ask_bot_token)
         await message.answer(ASK_TOKEN_PROMPT)
 
@@ -931,8 +1010,26 @@ async def _run_pipeline_and_save(
     bot_token: str,
     platform: str = "telegram",
 ) -> None:
-    """Run pipeline, save bot config, prepare files, and deploy."""
     user = message.from_user
+    await _run_pipeline_core(
+        send_fn=message.answer,
+        user_id=user.id,
+        username=user.username,
+        state=state,
+        bot_token=bot_token,
+        platform=platform,
+    )
+
+
+async def _run_pipeline_core(
+    send_fn,
+    user_id: int,
+    username: str | None,
+    state: FSMContext,
+    bot_token: str,
+    platform: str = "telegram",
+) -> None:
+    """Run pipeline, save bot config, prepare files, and deploy."""
     data = await state.get_data()
     bot_type = data.get("bot_type")
     raw_answers: dict = data.get("answers") or {}
@@ -970,11 +1067,11 @@ async def _run_pipeline_and_save(
         raw_answers_to_save = raw_answers
         final_type = None
 
-    await message.answer("Агенты приступили к работе, ожидайте ~60 секунд...")
+    await send_fn("Агенты приступили к работе, ожидайте ~60 секунд...")
 
     logger.info(
         "intake: pipeline launched for tg_id={} bot_type={} q_count={} sensitive={} platform={}",
-        user.id,
+        user_id,
         bot_type,
         len(llm_answers),
         sensitive_count,
@@ -982,7 +1079,7 @@ async def _run_pipeline_and_save(
     )
     try:
         spec = await asyncio.to_thread(run_pipeline, pipeline_input)
-        client = await get_or_create_client(user.id, user.username)
+        client = await get_or_create_client(user_id, username)
 
         # Second bots-limit gate: between consent and token submission a
         # parallel session could have created bots, or the client could
@@ -990,7 +1087,7 @@ async def _run_pipeline_and_save(
         # has already run (tokens spent) — log warning if we have to bail.
         _is_combo = len(selected_types) > 1
         allowed, plan_name, count, limit = await _check_bots_limit(
-            client.id, user.id, is_combo=_is_combo
+            client.id, user_id, is_combo=_is_combo
         )
         if not allowed:
             _kind = "комбо-ботов" if _is_combo else "простых ботов"
@@ -1003,13 +1100,13 @@ async def _run_pipeline_and_save(
                 _kind,
                 plan_name,
             )
-            await message.answer(
+            await send_fn(
                 f"🚫 Достигнут лимит {_kind} на вашем тарифе.\n\n"
                 f"Текущий тариф: {plan_name} ({_kind}: {count}/{limit})\n\n"
                 "Варианты:\n"
                 "• Удалите ненужного бота через 🤖 Мои боты\n"
                 "• Перейдите на тариф выше → 💎 Тариф",
-                reply_markup=_main_menu_keyboard(is_admin_user=is_admin(user.id)),
+                reply_markup=_main_menu_keyboard(is_admin_user=is_admin(user_id)),
             )
             await state.clear()
             return
@@ -1050,8 +1147,8 @@ async def _run_pipeline_and_save(
                 model=entry["model"],
             )
     except Exception:
-        logger.exception("intake: pipeline failed for tg_id={}", user.id)
-        await message.answer("Что-то пошло не так, попробуйте ещё раз /start")
+        logger.exception("intake: pipeline failed for tg_id={}", user_id)
+        await send_fn("Что-то пошло не так, попробуйте ещё раз /start")
         await state.clear()
         return
 
@@ -1093,7 +1190,7 @@ async def _run_pipeline_and_save(
     sub = await get_active_subscription(client.id)
     cur_tier = sub.tier if (sub and sub.status == "active") else "starter"
     if deploy_ok:
-        await message.answer(
+        await send_fn(
             f"✅ {platform_label}-бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
             f"Контейнер: bot_client_{saved_bot.id}\n\n"
             "Оформите подписку /subscribe чтобы открыть доступ клиентам.\n\n"
@@ -1101,7 +1198,7 @@ async def _run_pipeline_and_save(
             reply_markup=post_create_kb,
         )
     else:
-        await message.answer(
+        await send_fn(
             f"⚠️ {platform_label}-бот создан, но контейнер не поднялся.\n\nТип: {resolved_type}\n\n"
             "Напишите в поддержку: вероятно конфликт токена или ошибка в коде бота. "
             "Можно посмотреть логи через /mybots → карточка бота.",
@@ -1112,6 +1209,27 @@ async def _run_pipeline_and_save(
 
 @router.message(IntakeStates.ask_bot_token)
 async def on_bot_token(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user is None:
+        return
+
+    bot_token = (message.text or "").strip()
+    try:
+        validate_token(bot_token)
+    except TokenValidationError:
+        await message.answer(
+            "Это не похоже на токен бота. "
+            "Проверьте формат (цифры:буквы) и отправьте ещё раз."
+        )
+        return
+
+    await state.set_state(IntakeStates.processing)
+    await _run_pipeline_and_save(message, state, bot_token, platform="telegram")
+
+
+@router.message(IntakeStates.waiting_managed_bot)
+async def on_managed_bot_manual_token(message: Message, state: FSMContext) -> None:
+    """Fallback: user typed a BotFather token while waiting for managed-bot button."""
     user = message.from_user
     if user is None:
         return
@@ -5116,11 +5234,13 @@ async def cmd_admin_stats(message: Message) -> None:
 
 
 BOT_TOKEN = settings.bot_token
+BOT_ID = int(BOT_TOKEN.split(":")[0])
 _BOT_USERNAME: str | None = None
 
 bot = Bot(token=BOT_TOKEN)
 storage = RedisStorage.from_url(settings.redis_url)
 dp = Dispatcher(storage=storage)
+dp.update.outer_middleware(ManagedBotMiddleware())
 dp.message.middleware(ConsentGateMiddleware())
 dp.callback_query.middleware(ConsentGateMiddleware())
 dp.include_router(router)
@@ -5155,8 +5275,11 @@ async def main():
     attach_broadcasts_scheduler(scheduler, bot)
     attach_health_monitor(scheduler, bot)
 
+    used_updates = list(dp.resolve_used_update_types())
+    if "managed_bot" not in used_updates:
+        used_updates.append("managed_bot")
     polling_task = asyncio.create_task(
-        dp.start_polling(bot), name="polling"
+        dp.start_polling(bot, allowed_updates=used_updates), name="polling"
     )
     webhook_task = asyncio.create_task(
         start_webhook_server(bot), name="webhook"
