@@ -44,6 +44,7 @@ from deployer import (
     write_bot_greeting,
     write_bot_blacklist,
     write_bot_webhook_url,
+    write_bot_crm_type,
     write_bot_triggers,
     write_bot_rate_limit,
     write_bot_quick_replies,
@@ -3947,6 +3948,38 @@ async def on_blacklist_id(message: Message, state: FSMContext) -> None:
         )
 
 
+_CRM_LABELS = {
+    "generic": "🔗 Общий webhook",
+    "bitrix24": "🏢 Bitrix24",
+    "amocrm": "💼 amoCRM",
+}
+
+_CRM_INSTRUCTIONS = {
+    "generic": (
+        "Пришлите URL — бот будет POST'ить JSON на каждое сообщение:\n"
+        "`{bot_id, telegram_id, username, first_name, text, timestamp}`\n\n"
+        "Чтобы отключить — пришлите «-»."
+    ),
+    "bitrix24": (
+        "Подключение к Bitrix24:\n"
+        "1. Откройте Bitrix24 → Разработчикам → Входящий вебхук\n"
+        "2. Выдайте права на crm (лиды)\n"
+        "3. Скопируйте URL вида `https://domain.bitrix24.ru/rest/1/hash/`\n\n"
+        "Пришлите этот URL — бот создаст лид при каждом новом сообщении.\n"
+        "Чтобы отключить — пришлите «-»."
+    ),
+    "amocrm": (
+        "Подключение к amoCRM:\n"
+        "1. Откройте amoCRM → Настройки → Интеграции → API\n"
+        "2. Создайте интеграцию, получите Long-lived token\n"
+        "3. URL: `https://domain.amocrm.ru/api/v4/leads`\n"
+        "   Заголовок Authorization добавьте в URL параметром token или настройте через Zapier/n8n\n\n"
+        "Пришлите URL — бот POST'ит лид при каждом сообщении.\n"
+        "Чтобы отключить — пришлите «-»."
+    ),
+}
+
+
 @router.callback_query(F.data.startswith("bot:edit_webhook:"))
 async def cb_bot_edit_webhook(callback: CallbackQuery, state: FSMContext) -> None:
     resolved = await _resolve_edit_target(callback, "bot:edit_webhook:")
@@ -3954,15 +3987,64 @@ async def cb_bot_edit_webhook(callback: CallbackQuery, state: FSMContext) -> Non
         return
     bot_id, client_id = resolved
     bot_cfg = await get_bot_by_id(bot_id, client_id)
-    current_url = (bot_cfg.config_json or {}).get("webhook_url", "") if bot_cfg else ""
-    hint = f"\nТекущий URL: {current_url}" if current_url else "\nWebhook не настроен."
+    cfg = bot_cfg.config_json or {} if bot_cfg else {}
+    current_url = cfg.get("webhook_url", "")
+    current_crm = cfg.get("crm_type", "generic")
+    status = f"Сейчас: {_CRM_LABELS.get(current_crm, current_crm)} — {current_url}" if current_url else "Webhook не настроен."
+    crm_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Общий webhook", callback_data=f"bot:wh_type:{bot_id}:generic")],
+        [InlineKeyboardButton(text="🏢 Bitrix24", callback_data=f"bot:wh_type:{bot_id}:bitrix24")],
+        [InlineKeyboardButton(text="💼 amoCRM", callback_data=f"bot:wh_type:{bot_id}:amocrm")],
+        [InlineKeyboardButton(text="❌ Отключить", callback_data=f"bot:wh_type:{bot_id}:off")],
+    ])
     if callback.message is not None:
         await callback.message.answer(
-            "Пришлите URL для webhook (https://...) — бот будет POST'ить каждое сообщение туда.\n"
-            "Чтобы отключить — пришлите «-»." + hint
+            f"🔗 Webhook / CRM-интеграция\n{status}\n\nВыберите тип подключения:",
+            reply_markup=crm_kb,
         )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:wh_type:"))
+async def cb_bot_webhook_type(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = (callback.data or "").split(":", 3)
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, _, bot_id_str, crm_type = parts
+    try:
+        bot_id = int(bot_id_str)
+    except ValueError:
+        await callback.answer()
+        return
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    client = await get_or_create_client(user.id, user.username)
+
+    if crm_type == "off":
+        ok = await update_bot_config(bot_id, client.id, "webhook_url", "")
+        if ok:
+            await update_bot_config(bot_id, client.id, "crm_type", "generic")
+            try:
+                await asyncio.to_thread(write_bot_webhook_url, bot_id, "")
+                await asyncio.to_thread(write_bot_crm_type, bot_id, "generic")
+                await redeploy_bot(bot_id)
+                if callback.message:
+                    await callback.message.answer("🔗 Webhook отключён и бот перезапущен.")
+            except Exception:
+                logger.exception("wh_type:off redeploy failed bot_id={}", bot_id)
+                if callback.message:
+                    await callback.message.answer("🔗 Webhook отключён в настройках (бот перезапустится при следующем деплое).")
+        await callback.answer()
+        return
+
+    instr = _CRM_INSTRUCTIONS.get(crm_type, _CRM_INSTRUCTIONS["generic"])
+    if callback.message is not None:
+        await callback.message.answer(instr, parse_mode="Markdown")
     await state.set_state(EditStates.waiting_webhook)
-    await state.update_data(edit_bot_id=bot_id)
+    await state.update_data(edit_bot_id=bot_id, edit_crm_type=crm_type)
     await callback.answer()
 
 
@@ -3977,6 +4059,7 @@ async def on_edit_webhook(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     bot_id = data.get("edit_bot_id")
+    crm_type: str = data.get("edit_crm_type", "generic")
     if bot_id is None:
         await state.clear()
         await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
@@ -3991,12 +4074,15 @@ async def on_edit_webhook(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer("Бот не найден. /mybots чтобы выбрать другой.")
         return
+    await update_bot_config(bot_id, client.id, "crm_type", crm_type if url else "generic")
     await state.clear()
     try:
         await asyncio.to_thread(write_bot_webhook_url, bot_id, url)
+        await asyncio.to_thread(write_bot_crm_type, bot_id, crm_type if url else "generic")
         await redeploy_bot(bot_id)
         if url:
-            await message.answer(f"🔗 Webhook сохранён и бот перезапущен.\nURL: {url}")
+            label = _CRM_LABELS.get(crm_type, crm_type)
+            await message.answer(f"🔗 {label} подключён и бот перезапущен.\nURL: {url}")
         else:
             await message.answer("🔗 Webhook отключён и бот перезапущен.")
     except Exception:

@@ -77,3 +77,47 @@ async def test_bots_have_independent_webhook_urls(fresh_db):
     cfg_b = await get_bot_by_id(bot_b.id, client.id)
     assert cfg_a.config_json["webhook_url"] == "https://a.com/hook"
     assert cfg_b.config_json.get("webhook_url", "") == ""
+
+
+async def test_crm_type_saved_in_config(fresh_db):
+    """crm_type is stored independently from webhook_url."""
+    from db.repository import get_bot_by_id, update_bot_config
+    client = await _make_client(99008)
+    bot = await _make_bot(client.id, 8)
+    await update_bot_config(bot.id, client.id, "webhook_url", "https://domain.bitrix24.ru/rest/1/hash/")
+    await update_bot_config(bot.id, client.id, "crm_type", "bitrix24")
+    cfg = await get_bot_by_id(bot.id, client.id)
+    assert cfg.config_json["crm_type"] == "bitrix24"
+    assert "bitrix24" in cfg.config_json["webhook_url"]
+
+
+async def test_crm_type_reset_on_webhook_disable(fresh_db):
+    """When webhook is cleared, crm_type resets to generic."""
+    from db.repository import get_bot_by_id, update_bot_config
+    client = await _make_client(99009)
+    bot = await _make_bot(client.id, 9)
+    await update_bot_config(bot.id, client.id, "webhook_url", "https://domain.bitrix24.ru/rest/1/hash/")
+    await update_bot_config(bot.id, client.id, "crm_type", "bitrix24")
+    await update_bot_config(bot.id, client.id, "webhook_url", "")
+    await update_bot_config(bot.id, client.id, "crm_type", "generic")
+    cfg = await get_bot_by_id(bot.id, client.id)
+    assert cfg.config_json["crm_type"] == "generic"
+    assert cfg.config_json["webhook_url"] == ""
+
+
+def test_write_bot_crm_type(tmp_path, monkeypatch):
+    """write_bot_crm_type writes crm_type.txt in the bot directory."""
+    from deployer import write_bot_crm_type, BOTS_DIR
+    import deployer
+    monkeypatch.setattr(deployer, "BOTS_DIR", tmp_path)
+    write_bot_crm_type(42, "bitrix24")
+    assert (tmp_path / "42" / "crm_type.txt").read_text() == "bitrix24"
+
+
+def test_write_bot_crm_type_defaults_to_generic(tmp_path, monkeypatch):
+    """Empty string defaults to 'generic'."""
+    from deployer import write_bot_crm_type
+    import deployer
+    monkeypatch.setattr(deployer, "BOTS_DIR", tmp_path)
+    write_bot_crm_type(43, "")
+    assert (tmp_path / "43" / "crm_type.txt").read_text() == "generic"

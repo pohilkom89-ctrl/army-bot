@@ -57,6 +57,7 @@ COPY system_prompt.txt /app/system_prompt.txt
 COPY greeting.txt /app/greeting.txt
 COPY blacklist.txt /app/blacklist.txt
 COPY webhook_url.txt /app/webhook_url.txt
+COPY crm_type.txt /app/crm_type.txt
 COPY triggers.json /app/triggers.json
 COPY rate_limit.txt /app/rate_limit.txt
 COPY quick_replies.json /app/quick_replies.json
@@ -88,6 +89,8 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
         (bot_dir / "blacklist.txt").write_text("", encoding="utf-8")
     if not (bot_dir / "webhook_url.txt").exists():
         (bot_dir / "webhook_url.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "crm_type.txt").exists():
+        (bot_dir / "crm_type.txt").write_text("generic", encoding="utf-8")
     if not (bot_dir / "triggers.json").exists():
         (bot_dir / "triggers.json").write_text("{}", encoding="utf-8")
     if not (bot_dir / "rate_limit.txt").exists():
@@ -172,6 +175,13 @@ def write_bot_webhook_url(bot_id: int, url: str) -> None:
     bot_dir = _bot_dir(bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "webhook_url.txt").write_text(url or "", encoding="utf-8")
+
+
+def write_bot_crm_type(bot_id: int, crm_type: str) -> None:
+    """Write crm_type.txt for the bot (generic | bitrix24 | amocrm)."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "crm_type.txt").write_text(crm_type or "generic", encoding="utf-8")
 
 
 def write_bot_greeting(bot_id: int, greeting: str) -> None:
@@ -503,6 +513,8 @@ def prepare_vk_bot_files(bot_id: int, system_prompt: str) -> Path:
         (bot_dir / "blacklist.txt").write_text("", encoding="utf-8")
     if not (bot_dir / "webhook_url.txt").exists():
         (bot_dir / "webhook_url.txt").write_text("", encoding="utf-8")
+    if not (bot_dir / "crm_type.txt").exists():
+        (bot_dir / "crm_type.txt").write_text("generic", encoding="utf-8")
     if not (bot_dir / "triggers.json").exists():
         (bot_dir / "triggers.json").write_text("{}", encoding="utf-8")
     if not (bot_dir / "rate_limit.txt").exists():

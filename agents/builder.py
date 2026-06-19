@@ -42,10 +42,36 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * Файл `blacklist.txt` уже лежит в /app (может быть пустым)
 - Webhook для CRM-интеграции:
   * `WEBHOOK_URL = Path("/app/webhook_url.txt").read_text(encoding="utf-8").strip()`
+  * `CRM_TYPE = Path("/app/crm_type.txt").read_text(encoding="utf-8").strip() or "generic"`
   * Если WEBHOOK_URL не пустой, в каждом message-хендлере (кроме /start) до LLM-вызова делай fire-and-forget: `asyncio.create_task(_fire_webhook(message))`
-  * `_fire_webhook` POST'ит JSON с полями: bot_id, telegram_id, username, first_name, text, timestamp (ISO)
-  * Используй `aiohttp.ClientSession` с timeout=5с, ловь все исключения через logger.warning (не падай)
-  * Файл `webhook_url.txt` уже лежит в /app (может быть пустым — тогда webhook отключён)
+  * `_fire_webhook` реализуй так:
+    ```python
+    async def _fire_webhook(message) -> None:
+        if not WEBHOOK_URL:
+            return
+        u = message.from_user
+        ts = datetime.now(timezone.utc).isoformat()
+        try:
+            async with aiohttp.ClientSession() as s:
+                if CRM_TYPE == "bitrix24":
+                    url = WEBHOOK_URL.rstrip("/") + "/crm.lead.add.json"
+                    body = {"fields": {
+                        "TITLE": f"{u.first_name or u.id} — Telegram бот",
+                        "COMMENTS": message.text or "",
+                        "SOURCE_DESCRIPTION": "Telegram Bot",
+                    }}
+                elif CRM_TYPE == "amocrm":
+                    url = WEBHOOK_URL
+                    body = {"_embedded": {"leads": [{"name": f"{u.first_name or u.id}", "custom_fields_values": [{"field_code": "NOTES", "values": [{"value": message.text or ""}]}]}]}}
+                else:
+                    url = WEBHOOK_URL
+                    body = {"bot_id": BOT_ID, "telegram_id": u.id, "username": u.username, "first_name": u.first_name, "text": message.text, "timestamp": ts}
+                await s.post(url, json=body, timeout=aiohttp.ClientTimeout(total=5))
+        except Exception as e:
+            logger.warning("webhook: {}", e)
+    ```
+  * Добавь `from datetime import datetime, timezone` если ещё нет
+  * Файлы `webhook_url.txt` и `crm_type.txt` уже лежат в /app
 - Триггеры по ключевым словам (без LLM):
   * `import json as _json`
   * `TRIGGERS: dict[str, str] = _json.loads(Path("/app/triggers.json").read_text(encoding="utf-8"))`
