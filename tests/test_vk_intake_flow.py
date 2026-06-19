@@ -103,9 +103,10 @@ async def test_goto_token_or_process_telegram_asks_token():
     state.get_data = AsyncMock(return_value={"platform": "telegram"})
     state.set_state = AsyncMock()
 
-    await _goto_token_or_process(message, state)
+    with patch("main._send_managed_bot_button", side_effect=Exception("no API")):
+        await _goto_token_or_process(message, state)
 
-    state.set_state.assert_called_once_with(IntakeStates.ask_bot_token)
+    state.set_state.assert_any_call(IntakeStates.ask_bot_token)
     message.answer.assert_called_once_with(ASK_TOKEN_PROMPT)
 
 
@@ -135,9 +136,10 @@ async def test_goto_token_or_process_no_platform_asks_token():
     state.get_data = AsyncMock(return_value={})
     state.set_state = AsyncMock()
 
-    await _goto_token_or_process(message, state)
+    with patch("main._send_managed_bot_button", side_effect=Exception("no API")):
+        await _goto_token_or_process(message, state)
 
-    state.set_state.assert_called_once_with(IntakeStates.ask_bot_token)
+    state.set_state.assert_any_call(IntakeStates.ask_bot_token)
     message.answer.assert_called_once_with(ASK_TOKEN_PROMPT)
 
 

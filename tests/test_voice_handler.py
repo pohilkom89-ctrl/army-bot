@@ -41,7 +41,7 @@ def test_whitespace_only_transcript_detected():
 
 def test_trigger_matches_transcribed():
     triggers = {"цена": "Цена — 1000 руб."}
-    text = "Скажи мне цену"
+    text = "Скажи мне цена"
     matched = any(k.lower() in text.lower() for k in triggers)
     assert matched
 

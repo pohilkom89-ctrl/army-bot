@@ -58,6 +58,7 @@ from db.repository import (
     get_active_subscription,
     get_admin_stats,
     get_bot_analytics,
+    get_deep_analytics,
     get_bot_by_id,
     get_bot_stats,
     get_chat_history,
@@ -2752,10 +2753,11 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
         return
     bot_id, client_id = resolved
     bot_cfg = await get_bot_by_id(bot_id, client_id)
-    analytics, sub_stats, funnel = await asyncio.gather(
+    analytics, sub_stats, funnel, deep = await asyncio.gather(
         get_bot_analytics(bot_id, client_id),
         get_subscriber_stats(bot_id, client_id),
         get_engagement_funnel(bot_id, client_id),
+        get_deep_analytics(bot_id, client_id),
     )
     if bot_cfg is None or analytics is None:
         await callback.answer("Бот не найден", show_alert=True)
@@ -2790,17 +2792,40 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
             f"   ↓ Активны (7 дн): {_format_num(act)} ({_pct(act, subs)})\n"
         )
 
+    audience_section = ""
+    if deep:
+        peak_d = deep["peak_hour"]
+        peak_d_str = f"{peak_d:02d}:00–{(peak_d+1)%24:02d}:00 UTC" if peak_d is not None else "нет данных"
+        audience_section = (
+            f"\n👥 Аудитория бота\n"
+            f"   Сегодня: {_format_num(deep['unique_today'])}\n"
+            f"   За 7 дней: {_format_num(deep['unique_7d'])}\n"
+            f"   За 30 дней: {_format_num(deep['unique_30d'])}\n"
+            f"   Среднее сообщ./юзер: {deep['avg_per_user']}\n"
+            f"   Пиковый час: {peak_d_str}\n"
+        )
+
+    top_q_section = ""
+    if deep and deep["top_questions"]:
+        lines = ["\n🔝 Топ вопросы пользователей\n"]
+        for i, (q, cnt) in enumerate(deep["top_questions"], 1):
+            preview = q[:60] + "…" if len(q) > 60 else q
+            lines.append(f"   {i}. {preview} ({cnt}×)\n")
+        top_q_section = "".join(lines)
+
     text = (
         f"📊 Аналитика — {bot_cfg.bot_name}\n"
         f"{sub_section}"
-        f"{funnel_section}\n"
+        f"{funnel_section}"
+        f"{audience_section}"
+        f"{top_q_section}\n"
         f"💬 Диалоги (/chat)\n"
         f"   Уникальных пользователей: {_format_num(analytics['unique_users'])}\n"
         f"   Всего сообщений: {_format_num(analytics['total_messages'])}\n"
         f"   За 7 дней: {_format_num(analytics['messages_7d'])}\n"
         f"   За 30 дней: {_format_num(analytics['messages_30d'])}\n"
         f"   Среднее/юзер: {analytics['avg_messages_per_user']}\n"
-        f"⏰ Пиковый час: {peak_str}"
+        f"⏰ Пиковый час (/chat): {peak_str}"
     )
     analytics_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(

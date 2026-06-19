@@ -1600,6 +1600,93 @@ async def get_engagement_funnel(bot_id: int, client_id: int) -> dict | None:
         }
 
 
+async def get_deep_analytics(bot_id: int, client_id: int) -> dict | None:
+    """Wave 31: top questions, period audience, avg/user, peak hour (BotMessage).
+
+    Returns None if the bot is not owned by this client. Fields:
+    - top_questions: list of (text, count) — top-10 most frequent user messages ≤200 chars
+    - unique_today: distinct telegram_ids who wrote today (UTC midnight)
+    - unique_7d: distinct telegram_ids who wrote in last 7 days
+    - unique_30d: distinct telegram_ids who wrote in last 30 days
+    - avg_per_user: mean messages per unique user (all time)
+    - peak_hour: hour 0–23 UTC with most messages, or None
+    """
+    async with get_session() as session:
+        bot_result = await session.execute(
+            select(BotConfig).where(
+                BotConfig.id == bot_id,
+                BotConfig.client_id == client_id,
+            )
+        )
+        if bot_result.scalar_one_or_none() is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        user_msgs = [BotMessage.bot_id == bot_id, BotMessage.role == "user"]
+
+        top_q_rows = await session.execute(
+            select(
+                func.lower(func.trim(BotMessage.text)).label("q"),
+                func.count(BotMessage.id).label("cnt"),
+            )
+            .where(*user_msgs, func.length(BotMessage.text) <= 200)
+            .group_by(func.lower(func.trim(BotMessage.text)))
+            .order_by(func.count(BotMessage.id).desc())
+            .limit(10)
+        )
+        top_questions = [(row.q, int(row.cnt)) for row in top_q_rows]
+
+        unique_today = await session.scalar(
+            select(func.count(func.distinct(BotMessage.telegram_id))).where(
+                *user_msgs,
+                BotMessage.created_at >= today_start,
+            )
+        )
+        unique_7d = await session.scalar(
+            select(func.count(func.distinct(BotMessage.telegram_id))).where(
+                *user_msgs,
+                BotMessage.created_at >= now - timedelta(days=7),
+            )
+        )
+        unique_30d = await session.scalar(
+            select(func.count(func.distinct(BotMessage.telegram_id))).where(
+                *user_msgs,
+                BotMessage.created_at >= now - timedelta(days=30),
+            )
+        )
+
+        total_users = await session.scalar(
+            select(func.count(func.distinct(BotMessage.telegram_id))).where(*user_msgs)
+        )
+        total_msgs = await session.scalar(
+            select(func.count(BotMessage.id)).where(*user_msgs)
+        )
+
+        peak_row = await session.execute(
+            select(
+                func.extract("hour", BotMessage.created_at).label("hr"),
+                func.count(BotMessage.id).label("cnt"),
+            )
+            .where(*user_msgs)
+            .group_by(func.extract("hour", BotMessage.created_at))
+            .order_by(func.count(BotMessage.id).desc())
+            .limit(1)
+        )
+        peak = peak_row.first()
+
+        total_u = int(total_users or 0)
+        total_m = int(total_msgs or 0)
+        return {
+            "top_questions": top_questions,
+            "unique_today": int(unique_today or 0),
+            "unique_7d": int(unique_7d or 0),
+            "unique_30d": int(unique_30d or 0),
+            "avg_per_user": round(total_m / total_u, 1) if total_u else 0.0,
+            "peak_hour": int(peak.hr) if peak else None,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Scheduled broadcasts
 # ---------------------------------------------------------------------------
