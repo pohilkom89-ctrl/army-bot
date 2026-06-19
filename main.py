@@ -427,6 +427,9 @@ async def _start_questionnaire(
     spec = QUESTIONNAIRES[first_type]
     questions = spec["questions"]
 
+    prev_data = await state.get_data()
+    is_new_user: bool = prev_data.get("is_new_user", False)
+
     await state.update_data(
         bot_type=first_type,
         questionnaire_type=first_type,
@@ -448,11 +451,12 @@ async def _start_questionnaire(
             f"📋 Анкета 1 из {total}: {spec['name']}\n"
             f"━━━━━━━━━━━━━━━━━\n\n"
         )
+    elif is_new_user:
+        header = f"🚀 Шаг 2 из 3: ответьте на {len(questions)} вопросов о вашем боте.\n\n"
     else:
         header = f"Отлично, собираем «{spec['name']}». "
-    await message.answer(
-        f"{header}Задам {len(questions)} вопросов — отвечайте коротко и по делу."
-    )
+    body = "Отвечайте коротко и по делу." if is_new_user and total == 1 else f"Задам {len(questions)} вопросов — отвечайте коротко и по делу."
+    await message.answer(f"{header}{body}")
     await message.answer(_format_question(questions[0], 1, len(questions)))
 
 
@@ -644,29 +648,36 @@ async def on_consent_yes(message: Message, state: FSMContext) -> None:
         return
 
     # Install the persistent main menu now that the user has consented.
-    await message.answer(
-        "Согласие сохранено. Меню всегда доступно внизу экрана.",
-        reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user),
+    menu_note = (
+        "Отлично, всё готово! Меню доступно внизу экрана."
+        if trial_activated
+        else "Согласие сохранено. Меню всегда доступно внизу экрана."
     )
+    await message.answer(menu_note, reply_markup=_main_menu_keyboard(is_admin_user=is_admin_user))
 
     sub = await get_active_subscription(client.id)
     tier = sub.tier if (sub and sub.status == "active") else "starter"
     multitype_limit: int = PLANS[tier].get("multitype_limit", 1)
 
     if multitype_limit > 1:
+        header = (
+            "🚀 Шаг 1 из 3: выберите типы бота\n"
+            f"На тарифе {PLANS[tier]['name']} можно объединить до {multitype_limit} типов:"
+            if trial_activated
+            else f"Что именно вам нужно?\nНа тарифе {PLANS[tier]['name']} можно объединить до {multitype_limit} типов в одном боте:"
+        )
         await state.set_state(IntakeStates.ask_type_multi)
-        await state.update_data(multitype_limit=multitype_limit, selected_types=[])
-        await message.answer(
-            f"Что именно вам нужно?\n"
-            f"На тарифе {PLANS[tier]['name']} можно объединить до {multitype_limit} типов в одном боте:",
-            reply_markup=_bot_type_multiselect_keyboard([], multitype_limit),
-        )
+        await state.update_data(multitype_limit=multitype_limit, selected_types=[], is_new_user=trial_activated)
+        await message.answer(header, reply_markup=_bot_type_multiselect_keyboard([], multitype_limit))
     else:
-        await state.set_state(IntakeStates.ask_type)
-        await message.answer(
-            "Что именно вам нужно?",
-            reply_markup=_bot_type_keyboard(),
+        header = (
+            "🚀 Шаг 1 из 3: выберите тип бота 👇"
+            if trial_activated
+            else "Что именно вам нужно?"
         )
+        await state.set_state(IntakeStates.ask_type)
+        await state.update_data(is_new_user=trial_activated)
+        await message.answer(header, reply_markup=_bot_type_keyboard())
 
 
 @router.message(IntakeStates.consent, F.text == "Не согласен")
@@ -1037,6 +1048,7 @@ async def _run_pipeline_core(
     clarification_answers: dict = data.get("clarification_answers") or {}
     selected_types: list[str] = data.get("selected_types") or []
     completed_answers: dict = data.get("completed_answers") or {}
+    is_new_user: bool = data.get("is_new_user", False)
 
     if len(selected_types) > 1:
         combined_raw: dict = {}
@@ -1191,8 +1203,13 @@ async def _run_pipeline_core(
     sub = await get_active_subscription(client.id)
     cur_tier = sub.tier if (sub and sub.status == "active") else "starter"
     if deploy_ok:
+        first_bot_header = (
+            "🎉 Шаг 3 из 3 — готово! Ваш первый бот запущен!\n\n"
+            if is_new_user
+            else f"✅ {platform_label}-бот готов и запущен в контейнере!\n\n"
+        )
         await send_fn(
-            f"✅ {platform_label}-бот готов и запущен в контейнере!\n\nТип: {resolved_type}\n"
+            f"{first_bot_header}Тип: {resolved_type}\n"
             f"Контейнер: bot_client_{saved_bot.id}\n\n"
             "Оформите подписку /subscribe чтобы открыть доступ клиентам.\n\n"
             + _post_create_next_steps(cur_tier),
@@ -2827,13 +2844,20 @@ async def cb_bot_analytics(callback: CallbackQuery) -> None:
         f"   Среднее/юзер: {analytics['avg_messages_per_user']}\n"
         f"⏰ Пиковый час (/chat): {peak_str}"
     )
-    analytics_kb = InlineKeyboardMarkup(inline_keyboard=[
+    has_top_q = bool(deep and deep["top_questions"])
+    export_rows = [
         [InlineKeyboardButton(
             text="📥 Экспорт подписчиков",
             callback_data=f"bot:export_subs:{bot_id}",
         )],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")],
-    ])
+    ]
+    if has_top_q:
+        export_rows.append([InlineKeyboardButton(
+            text="📥 Топ вопросы (CSV)",
+            callback_data=f"bot:export_topq:{bot_id}",
+        )])
+    export_rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:manage:{bot_id}")])
+    analytics_kb = InlineKeyboardMarkup(inline_keyboard=export_rows)
     if callback.message is not None:
         await callback.message.answer(text, reply_markup=analytics_kb)
     await callback.answer()
@@ -2869,6 +2893,37 @@ async def cb_bot_export_subs(callback: CallbackQuery) -> None:
         await callback.message.answer_document(
             BufferedInputFile(buf.getvalue().encode("utf-8-sig"), filename=filename),
             caption=f"📥 {len(rows)} подписчиков",
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:export_topq:"))
+async def cb_bot_export_top_questions(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:export_topq:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    deep = await get_deep_analytics(bot_id, client_id)
+    if deep is None:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+    questions = deep["top_questions"]
+    if not questions:
+        await callback.answer("Вопросов пока нет.", show_alert=True)
+        return
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    bot_name = bot_cfg.bot_name if bot_cfg else str(bot_id)
+    buf = StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["rank", "question", "count"])
+    writer.writeheader()
+    for i, (q, cnt) in enumerate(questions, 1):
+        writer.writerow({"rank": i, "question": q, "count": cnt})
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    filename = f"top_questions_{bot_name}_{date_str}.csv"
+    if callback.message is not None:
+        await callback.message.answer_document(
+            BufferedInputFile(buf.getvalue().encode("utf-8-sig"), filename=filename),
+            caption=f"📥 Топ {len(questions)} вопросов пользователей",
         )
     await callback.answer()
 
