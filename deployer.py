@@ -37,7 +37,7 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir \\
     aiogram==3.13.0 \\
-    vkbottle==4.3.15 \\
+    vkbottle==4.9.0 \\
     openai==2.31.0 \\
     loguru==0.7.3 \\
     python-dotenv==1.0.1 \\
