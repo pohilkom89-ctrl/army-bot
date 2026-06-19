@@ -2310,9 +2310,12 @@ async def _enter_chat_session(
         return
 
     bot_cfg = active_bots[0]
+    sub = await get_active_subscription(client_id)
+    chat_tier = sub.tier if (sub and sub.status == "active") else "starter"
     await state.set_state(InlineChatStates.chatting)
     await state.update_data(
-        chat_bot_id=bot_cfg.id, chat_bot_name=bot_cfg.bot_name
+        chat_bot_id=bot_cfg.id, chat_bot_name=bot_cfg.bot_name,
+        chat_tier=chat_tier,
     )
     await answer(
         f"Вы в режиме чата с ботом {bot_cfg.bot_name}.\n"
@@ -2669,6 +2672,10 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
                     text="💬 Диалоги",
                     callback_data=f"bot:conversations:{bot.id}",
                 ),
+                InlineKeyboardButton(
+                    text="📚 База знаний",
+                    callback_data=f"bot:library_info:{bot.id}",
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -2764,6 +2771,38 @@ async def cb_bot_list(callback: CallbackQuery) -> None:
     text, kb = await _render_mybots_list(client.id)
     if callback.message is not None:
         await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot:library_info:"))
+async def cb_bot_library_info(callback: CallbackQuery) -> None:
+    resolved = await _resolve_edit_target(callback, "bot:library_info:")
+    if resolved is None:
+        return
+    bot_id, client_id = resolved
+    bot_cfg = await get_bot_by_id(bot_id, client_id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    sources = await list_library_sources(bot_cfg.bot_type)
+    type_ru = _bot_type_ru(bot_cfg.bot_type)
+    if not sources:
+        body = "Библиотека для этого типа бота пока пуста.\nПлатформа добавит книги в ближайшее время."
+    else:
+        lines = []
+        for _, source, count in sources:
+            lines.append(f"• {source} ({count} фрагм.)")
+        body = "\n".join(lines)
+
+    await callback.message.edit_text(
+        f"📚 База знаний — {type_ru}\n\n{body}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:detail:{bot_id}")
+            ]]
+        ),
+    )
     await callback.answer()
 
 
@@ -4825,6 +4864,7 @@ async def _handle_chat_text(
             "Сессия потеряна. /chat чтобы начать заново."
         )
         return
+    chat_tier = data.get("chat_tier", "starter")
 
     client = await get_or_create_client(user.id, user.username)
     bots = await get_client_bots(client.id)
@@ -4864,7 +4904,7 @@ async def _handle_chat_text(
     try:
         rag_chunks = await search_knowledge(
             client.id, bot_id, text, limit=RAG_TOP_K,
-            bot_type=bot_cfg.bot_type,
+            bot_type=None if chat_tier == "starter" else bot_cfg.bot_type,
         )
     except Exception:
         logger.exception(
