@@ -310,7 +310,9 @@ class MergeStates(StatesGroup):
 
 
 class BroadcastStates(StatesGroup):
-    confirm = State()
+    waiting_content = State()
+    waiting_url = State()
+    confirming = State()
     sending = State()
 
 
@@ -3023,7 +3025,7 @@ async def cb_bot_broadcast_start(callback: CallbackQuery, state: FSMContext) -> 
             )
         await callback.answer()
         return
-    await state.set_state(BroadcastStates.confirm)
+    await state.set_state(BroadcastStates.waiting_content)
     await state.update_data(broadcast_bot_id=bot_id, broadcast_bot_token=bot_cfg.bot_token)
     if callback.message is not None:
         await callback.message.answer(
@@ -3045,38 +3047,166 @@ async def cb_broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> Non
         await callback.message.answer("Рассылка отменена. /mybots")
 
 
-@router.message(BroadcastStates.confirm)
-async def on_broadcast_text(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("Пустой текст. Пришлите сообщение для рассылки.")
+def _broadcast_confirm_kb(sub_count: int, has_btn: bool) -> InlineKeyboardMarkup:
+    add_btn_label = "✏️ Изменить кнопку-ссылку" if has_btn else "🔗 Добавить кнопку-ссылку"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"✅ Отправить {_format_num(sub_count)} подписчикам",
+            callback_data="broadcast:do_send",
+        )],
+        [InlineKeyboardButton(text=add_btn_label, callback_data="broadcast:add_btn")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
+    ])
+
+
+def _broadcast_preview_text(data: dict) -> str:
+    ctype = data.get("broadcast_content_type", "text")
+    text = data.get("broadcast_text", "")
+    caption = data.get("broadcast_caption", "")
+    btn_url = data.get("broadcast_btn_url", "")
+    btn_text = data.get("broadcast_btn_text", "")
+    sub_count = data.get("broadcast_sub_count", 0)
+
+    content_preview = ""
+    if ctype == "photo":
+        content_preview = f"🖼 Фото" + (f" + подпись:\n{caption[:200]}" if caption else "")
+    else:
+        content_preview = f"Текст:\n{text[:300]}{'…' if len(text) > 300 else ''}"
+
+    btn_line = f"\n\n🔗 Кнопка: {btn_text} → {btn_url}" if btn_url else ""
+    return (
+        f"📢 Предпросмотр рассылки ({_format_num(sub_count)} подписч.)\n\n"
+        f"{content_preview}{btn_line}"
+    )
+
+
+@router.message(BroadcastStates.waiting_content, F.text | F.photo)
+async def on_broadcast_content(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    bot_id = data.get("broadcast_bot_id")
+    if not bot_id:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
         return
+
+    if message.photo:
+        content_type = "photo"
+        photo_id = message.photo[-1].file_id
+        caption = (message.caption or "").strip()
+        text = ""
+    else:
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer("Пустой текст. Пришлите сообщение или фото.")
+            return
+        content_type = "text"
+        photo_id = None
+        caption = ""
+
+    sub_count = len(await get_subscriber_ids(bot_id))
+    await state.update_data(
+        broadcast_content_type=content_type,
+        broadcast_text=text,
+        broadcast_photo_id=photo_id,
+        broadcast_caption=caption,
+        broadcast_sub_count=sub_count,
+        broadcast_btn_url="",
+        broadcast_btn_text="",
+    )
+    await state.set_state(BroadcastStates.confirming)
+    preview_data = {
+        "broadcast_content_type": content_type,
+        "broadcast_text": text,
+        "broadcast_caption": caption,
+        "broadcast_btn_url": "",
+        "broadcast_btn_text": "",
+        "broadcast_sub_count": sub_count,
+    }
+    await message.answer(
+        _broadcast_preview_text(preview_data),
+        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=False),
+    )
+
+
+@router.message(BroadcastStates.waiting_url, F.text)
+async def on_broadcast_url(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if raw.lower() == "/skip":
+        btn_url, btn_text = "", ""
+    elif "|" in raw:
+        parts = raw.split("|", 1)
+        btn_url = parts[0].strip()
+        btn_text = parts[1].strip() or "Подробнее →"
+    else:
+        btn_url = raw
+        btn_text = "Подробнее →"
+
+    await state.update_data(broadcast_btn_url=btn_url, broadcast_btn_text=btn_text)
+    await state.set_state(BroadcastStates.confirming)
+    data = await state.get_data()
+    sub_count = data.get("broadcast_sub_count", 0)
+    await message.answer(
+        _broadcast_preview_text(data),
+        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=bool(btn_url)),
+    )
+
+
+@router.callback_query(F.data == "broadcast:add_btn", BroadcastStates.confirming)
+async def cb_broadcast_add_btn(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BroadcastStates.waiting_url)
+    await callback.message.answer(
+        "🔗 Пришлите ссылку для кнопки:\n"
+        "• Только URL: https://site.ru\n"
+        "• URL и текст: https://site.ru|Открыть сайт\n"
+        "• /skip — без кнопки"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast:do_send", BroadcastStates.confirming)
+async def cb_broadcast_do_send(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     bot_id = data.get("broadcast_bot_id")
     bot_token = data.get("broadcast_bot_token")
     if not bot_id or not bot_token:
         await state.clear()
-        await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
+        await callback.answer("Сессия потеряна", show_alert=True)
         return
 
     subscriber_ids = await get_subscriber_ids(bot_id)
     if not subscriber_ids:
         await state.clear()
-        await message.answer("Подписчиков не найдено. Рассылка отменена.")
+        await callback.answer("Подписчиков не найдено", show_alert=True)
         return
 
     await state.set_state(BroadcastStates.sending)
-    await message.answer(f"⏳ Отправляю {_format_num(len(subscriber_ids))} подписчикам…")
+    await callback.message.answer(f"⏳ Отправляю {_format_num(len(subscriber_ids))} подписчикам…")
+    await callback.answer()
+
+    ctype = data.get("broadcast_content_type", "text")
+    text = data.get("broadcast_text", "")
+    photo_id = data.get("broadcast_photo_id")
+    caption = data.get("broadcast_caption", "")
+    btn_url = data.get("broadcast_btn_url", "")
+    btn_text = data.get("broadcast_btn_text", "Подробнее →")
+
+    reply_markup = None
+    if btn_url:
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=btn_text, url=btn_url)
+        ]])
 
     broadcast_bot = Bot(token=bot_token)
     sent = 0
     failed = 0
-    # Telegram rate limit: 30 messages/sec; use ~25 to stay safe
     BATCH = 25
     try:
         for i, tg_id in enumerate(subscriber_ids):
             try:
-                await broadcast_bot.send_message(tg_id, text)
+                if ctype == "photo" and photo_id:
+                    await broadcast_bot.send_photo(tg_id, photo=photo_id, caption=caption or None, reply_markup=reply_markup)
+                else:
+                    await broadcast_bot.send_message(tg_id, text, reply_markup=reply_markup)
                 sent += 1
             except Exception:
                 failed += 1
@@ -3086,7 +3216,7 @@ async def on_broadcast_text(message: Message, state: FSMContext) -> None:
         await broadcast_bot.session.close()
 
     await state.clear()
-    await message.answer(
+    await callback.message.answer(
         f"✅ Рассылка завершена.\n"
         f"• Доставлено: {_format_num(sent)}\n"
         f"• Ошибок (бот заблокирован/не найден): {_format_num(failed)}"
