@@ -170,6 +170,23 @@ class KnowledgeChunk(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
+class LibraryChunk(Base):
+    """Shared knowledge library — book/article chunks indexed by bot_type.
+
+    Not tied to any client (no client_id FK). Used to augment RAG responses
+    for all bots of a given type without duplicating data per client.
+    """
+    __tablename__ = "library_chunks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bot_type = Column(String(64), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=False)
+    source = Column(String(256), nullable=True)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class ChatHistory(Base):
     __tablename__ = "chat_history"
 

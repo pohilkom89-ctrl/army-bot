@@ -38,11 +38,14 @@ def mock_run_agent(mocker):
 
 @pytest_asyncio.fixture
 async def fresh_db():
-    """Create all tables in the configured (in-memory by default) DB and
-    return after the test. SQLAlchemy models are dialect-portable so
-    SQLite drop-in works the same as Postgres in prod (verified by the
-    existing run_e2e.py path)."""
-    from db.database import init_db
+    """Drop and recreate all tables for each test so state doesn't leak.
+
+    SQLite in-memory connections are reused across tests by the connection
+    pool, so we must explicitly drop tables before recreating them.
+    """
+    from db.database import engine, init_db
+    from db.models import Base
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
     await init_db()
     yield
-    # in-memory SQLite is dropped on connection close; nothing to clean

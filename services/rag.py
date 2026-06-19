@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timezone
 
 from loguru import logger
 from openai import OpenAI
@@ -34,6 +35,9 @@ OPENROUTER_BASE_URL = settings.openrouter_base_url
 EMBEDDING_BASE_URL = settings.embedding_base_url
 EMBEDDING_MODEL = settings.embedding_model
 EMBEDDING_DIM = 1536
+
+# pgvector <=> operator is unavailable in SQLite (used in tests via fresh_db fixture)
+_USE_SQLITE = "sqlite" in os.getenv("DATABASE_URL", "").lower()
 
 CHUNK_SIZE_TOKENS = 500
 CHUNK_OVERLAP_TOKENS = 50
@@ -172,13 +176,15 @@ async def search_knowledge(
     bot_id: int | None,
     query: str,
     limit: int = SEARCH_LIMIT_DEFAULT,
+    bot_type: str | None = None,
 ) -> list[str]:
     """Return top-N chunk texts nearest to `query` under cosine distance.
 
     Scope:
         client_id — always filter (per-client isolation, 152-ФЗ).
-        bot_id    — if provided, match rows where bot_id = N OR bot_id IS NULL
-                    (client-global chunks are visible to any of their bots).
+        bot_id    — if provided, match rows where bot_id = N OR bot_id IS NULL.
+        bot_type  — if provided, also fetch shared library chunks for this type
+                    and append them after client-specific results (up to limit).
     """
     query = (query or "").strip()
     if not query:
@@ -187,19 +193,28 @@ async def search_knowledge(
     query_vec = await embed_text(query)
     emb_sql = _vector_to_sql(query_vec)
 
-    if bot_id is not None:
+    if _USE_SQLITE:
+        if bot_id is not None:
+            sql = (
+                "SELECT content FROM knowledge_chunks "
+                "WHERE client_id = :cid AND (bot_id = :bid OR bot_id IS NULL) "
+                "LIMIT :lim"
+            )
+            params: dict = {"cid": client_id, "bid": bot_id, "lim": limit}
+        else:
+            sql = (
+                "SELECT content FROM knowledge_chunks "
+                "WHERE client_id = :cid LIMIT :lim"
+            )
+            params = {"cid": client_id, "lim": limit}
+    elif bot_id is not None:
         sql = (
             "SELECT content FROM knowledge_chunks "
             "WHERE client_id = :cid AND (bot_id = :bid OR bot_id IS NULL) "
             "ORDER BY embedding <=> CAST(:emb AS vector) "
             "LIMIT :lim"
         )
-        params = {
-            "cid": client_id,
-            "bid": bot_id,
-            "emb": emb_sql,
-            "lim": limit,
-        }
+        params = {"cid": client_id, "bid": bot_id, "emb": emb_sql, "lim": limit}
     else:
         sql = (
             "SELECT content FROM knowledge_chunks "
@@ -213,14 +228,136 @@ async def search_knowledge(
         result = await session.execute(text(sql), params)
         rows = [row[0] for row in result.all()]
 
+    library_rows: list[str] = []
+    if bot_type:
+        library_rows = await search_library_chunks(bot_type, query, limit, emb_sql)
+
+    combined = rows + [r for r in library_rows if r not in rows]
+
     logger.info(
-        "rag.search_knowledge: {} hits for client_id={} bot_id={} query_len={}",
+        "rag.search_knowledge: {} client + {} library hits "
+        "for client_id={} bot_id={} bot_type={} query_len={}",
         len(rows),
+        len(library_rows),
         client_id,
         bot_id,
+        bot_type,
         len(query),
     )
-    return rows
+    return combined
+
+
+async def add_library_knowledge(
+    bot_type: str,
+    raw_text: str,
+    source: str,
+) -> int:
+    """Chunk, embed, and store raw_text in the shared library for bot_type.
+
+    Returns the number of chunks stored.
+    """
+    chunks = _chunk_text(raw_text)
+    if not chunks:
+        logger.warning(
+            "rag.add_library_knowledge: no chunks produced (source='{}', bot_type={})",
+            source,
+            bot_type,
+        )
+        return 0
+
+    vectors = await asyncio.to_thread(_embed_batch_sync, chunks)
+    if len(vectors) != len(chunks):
+        raise RuntimeError(
+            f"rag.add_library_knowledge: embedding count mismatch "
+            f"({len(vectors)} vs {len(chunks)} chunks)"
+        )
+
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+            await session.execute(
+                text(
+                    "INSERT INTO library_chunks "
+                    "(bot_type, content, embedding, source, chunk_index, created_at) "
+                    "VALUES (:bt, :content, CAST(:emb AS vector), :source, :idx, :ts)"
+                ),
+                {
+                    "bt": bot_type,
+                    "content": chunk,
+                    "emb": _vector_to_sql(vec),
+                    "source": source,
+                    "idx": idx,
+                    "ts": now,
+                },
+            )
+
+    logger.info(
+        "rag.add_library_knowledge: stored {} chunks from '{}' (bot_type={})",
+        len(chunks),
+        source,
+        bot_type,
+    )
+    return len(chunks)
+
+
+async def search_library_chunks(
+    bot_type: str,
+    query: str,
+    limit: int = SEARCH_LIMIT_DEFAULT,
+    precomputed_emb_sql: str | None = None,
+) -> list[str]:
+    """Return top-N library chunk texts for bot_type nearest to query."""
+    if precomputed_emb_sql is None:
+        query_vec = await embed_text(query)
+        precomputed_emb_sql = _vector_to_sql(query_vec)
+
+    if _USE_SQLITE:
+        sql = "SELECT content FROM library_chunks WHERE bot_type = :bt LIMIT :lim"
+        params: dict = {"bt": bot_type, "lim": limit}
+    else:
+        sql = (
+            "SELECT content FROM library_chunks "
+            "WHERE bot_type = :bt "
+            "ORDER BY embedding <=> CAST(:emb AS vector) "
+            "LIMIT :lim"
+        )
+        params = {"bt": bot_type, "emb": precomputed_emb_sql, "lim": limit}
+    async with get_session() as session:
+        result = await session.execute(text(sql), params)
+        return [row[0] for row in result.all()]
+
+
+async def list_library_sources(bot_type: str | None = None) -> list[tuple[str, str, int]]:
+    """Return [(bot_type, source, chunk_count)] sorted by bot_type, count desc."""
+    if bot_type:
+        sql = (
+            "SELECT bot_type, COALESCE(source, '(без названия)') AS src, COUNT(*) AS n "
+            "FROM library_chunks WHERE bot_type = :bt "
+            "GROUP BY bot_type, src ORDER BY n DESC"
+        )
+        params: dict = {"bt": bot_type}
+    else:
+        sql = (
+            "SELECT bot_type, COALESCE(source, '(без названия)') AS src, COUNT(*) AS n "
+            "FROM library_chunks "
+            "GROUP BY bot_type, src ORDER BY bot_type, n DESC"
+        )
+        params = {}
+    async with get_session() as session:
+        result = await session.execute(text(sql), params)
+        return [(row[0], row[1], int(row[2])) for row in result.all()]
+
+
+async def clear_library(bot_type: str) -> int:
+    """Delete all library chunks for bot_type. Returns count deleted."""
+    async with get_session() as session:
+        result = await session.execute(
+            text("DELETE FROM library_chunks WHERE bot_type = :bt"),
+            {"bt": bot_type},
+        )
+        deleted = int(result.rowcount or 0)
+    logger.info("rag.clear_library: deleted {} chunks for bot_type={}", deleted, bot_type)
+    return deleted
 
 
 async def count_knowledge(

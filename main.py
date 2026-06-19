@@ -128,6 +128,9 @@ from services.rag import (
     count_knowledge,
     list_knowledge_sources,
     search_knowledge,
+    add_library_knowledge,
+    list_library_sources,
+    clear_library,
 )
 from settings import settings
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
@@ -4860,7 +4863,8 @@ async def _handle_chat_text(
     # pgvector missing) must not break the chat — log and continue without.
     try:
         rag_chunks = await search_knowledge(
-            client.id, bot_id, text, limit=RAG_TOP_K
+            client.id, bot_id, text, limit=RAG_TOP_K,
+            bot_type=bot_cfg.bot_type,
         )
     except Exception:
         logger.exception(
@@ -5397,6 +5401,147 @@ async def cmd_admin_stats(message: Message) -> None:
         text += "\n🏆 Топ по токенам:\n" + "\n".join(top_lines)
 
     await message.answer(text)
+
+
+class LibraryStates(StatesGroup):
+    choose_type = State()
+    uploading = State()
+
+
+@router.message(Command("library"))
+async def cmd_library(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if not is_admin(user.id if user else None):
+        return
+    args = (message.text or "").split(maxsplit=1)
+    sub = args[1].strip() if len(args) > 1 else ""
+
+    if sub == "list" or not sub:
+        sources = await list_library_sources()
+        if not sources:
+            await message.answer("📚 Библиотека пуста. /library add чтобы загрузить.")
+            return
+        lines = ["📚 Общая библиотека знаний\n"]
+        prev_bt = None
+        for bt, src, cnt in sources:
+            if bt != prev_bt:
+                lines.append(f"\n🤖 [{bt}]")
+                prev_bt = bt
+            lines.append(f"  • {src}: {cnt} чанков")
+        await message.answer("\n".join(lines))
+        return
+
+    if sub.startswith("clear "):
+        bot_type_arg = sub[6:].strip()
+        if not bot_type_arg:
+            await message.answer("Укажите тип: /library clear <bot_type>")
+            return
+        deleted = await clear_library(bot_type_arg)
+        await message.answer(f"🗑 Удалено {deleted} чанков для [{bot_type_arg}].")
+        return
+
+    if sub == "add":
+        type_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=key, callback_data=f"lib_type:{key}")]
+            for key in list(QUESTIONNAIRES.keys())
+        ])
+        await message.answer("Выберите тип бота для библиотеки:", reply_markup=type_kb)
+        await state.set_state(LibraryStates.choose_type)
+        return
+
+    await message.answer(
+        "Команды:\n"
+        "/library — список библиотеки\n"
+        "/library add — загрузить материал\n"
+        "/library clear <bot_type> — очистить тип"
+    )
+
+
+@router.callback_query(LibraryStates.choose_type, F.data.startswith("lib_type:"))
+async def cb_library_type(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_type = (callback.data or "").split(":", 1)[1]
+    await state.update_data(library_bot_type=bot_type)
+    await state.set_state(LibraryStates.uploading)
+    if callback.message:
+        await callback.message.answer(
+            f"Тип: [{bot_type}]\n\n"
+            "Отправьте текст или PDF-файл. Можно несколько сообщений подряд.\n"
+            "Введите /library_done когда закончите."
+        )
+    await callback.answer()
+
+
+@router.message(LibraryStates.uploading, Command("library_done"))
+async def cmd_library_done(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    bot_type = data.get("library_bot_type", "?")
+    count = data.get("library_chunks_added", 0)
+    await state.clear()
+    await message.answer(f"✅ Загружено {count} чанков в библиотеку [{bot_type}].")
+
+
+@router.message(LibraryStates.uploading)
+async def on_library_upload(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    bot_type = data.get("library_bot_type")
+    if not bot_type:
+        await state.clear()
+        return
+
+    raw_text = ""
+    source = "текст"
+
+    if message.document:
+        doc = message.document
+        fname = (doc.file_name or "file").strip()
+        lname = fname.lower()
+        buf = BytesIO()
+        try:
+            await bot.download(doc, destination=buf)
+        except Exception:
+            logger.exception("library: download failed file_id={}", doc.file_id)
+            await message.answer("⚠️ Не удалось скачать файл.")
+            return
+        raw_bytes = buf.getvalue()
+        if lname.endswith(".pdf") or (doc.mime_type or "").lower() == "application/pdf":
+            try:
+                raw_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
+                source = fname
+            except Exception:
+                logger.exception("library: PDF parse failed fname={}", fname)
+                await message.answer("⚠️ Не удалось прочитать PDF. Попробуйте .txt или скопируйте текст.")
+                return
+        elif lname.endswith(".txt") or (doc.mime_type or "").lower().startswith("text/"):
+            try:
+                raw_text = raw_bytes.decode("utf-8", errors="replace")
+                source = fname
+            except Exception:
+                await message.answer("⚠️ Не удалось прочитать файл.")
+                return
+        else:
+            await message.answer("Поддерживаются .pdf и .txt файлы, или вставьте текст напрямую.")
+            return
+    elif message.text:
+        raw_text = message.text.strip()
+        source = raw_text[:40] + "…" if len(raw_text) > 40 else raw_text
+    else:
+        await message.answer("Отправьте текст или файл.")
+        return
+
+    if not raw_text.strip():
+        await message.answer("Пустой текст — пропускаю.")
+        return
+
+    try:
+        n = await add_library_knowledge(bot_type, raw_text, source)
+    except Exception:
+        logger.exception("library: add_library_knowledge failed bot_type={}", bot_type)
+        await message.answer("⚠️ Ошибка при индексации. Попробуйте ещё раз.")
+        return
+
+    total = data.get("library_chunks_added", 0) + n
+    await state.update_data(library_chunks_added=total)
+    await message.answer(f"✅ +{n} чанков [{bot_type}]. Итого: {total}. Продолжайте или /library_done.")
 
 
 BOT_TOKEN = settings.bot_token
