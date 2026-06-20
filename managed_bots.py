@@ -55,6 +55,21 @@ async def send_managed_bot_button(
         raise RuntimeError(f"send_managed_bot_button failed: {body.get('description')}")
 
 
+async def delete_managed_bot(managing_bot_token: str, bot_user_id: int) -> bool:
+    """Call deleteManagedBot to permanently delete a managed bot from Telegram.
+
+    Returns True on success, False if Telegram returned an error (e.g. bot was
+    created manually via BotFather and is not a managed bot).
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{_TG_API}/bot{managing_bot_token}/deleteManagedBot",
+            json={"user_id": bot_user_id},
+        ) as resp:
+            body = await resp.json()
+    return bool(body.get("ok"))
+
+
 async def get_managed_bot_token(managing_bot_token: str, bot_user_id: int) -> str:
     """Call getManagedBotToken and return the child bot's token string."""
     async with aiohttp.ClientSession() as session:

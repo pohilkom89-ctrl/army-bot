@@ -108,6 +108,7 @@ from db.repository import (
     get_engagement_funnel,
 )
 from managed_bots import (
+    delete_managed_bot as _delete_managed_bot,
     get_managed_bot_token as _get_managed_bot_token,
     send_managed_bot_button as _send_managed_bot_button,
 )
@@ -4846,6 +4847,7 @@ async def cb_bot_delete_yes(callback: CallbackQuery) -> None:
         await callback.answer("Некорректный идентификатор", show_alert=True)
         return
     client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
     # Tear down the container first — if we delete the DB row before the
     # container, we'd end up with an orphan container we no longer have the
     # bot_token for (it's sourced from BotConfig on every deploy).
@@ -4853,6 +4855,17 @@ async def cb_bot_delete_yes(callback: CallbackQuery) -> None:
         await remove_bot(bot_id)
     except Exception:
         logger.exception("mybots: remove_bot failed bot_id={}", bot_id)
+    # Delete the managed bot from Telegram (noop for BotFather bots).
+    if bot_cfg and bot_cfg.bot_token:
+        try:
+            child_user_id = int(bot_cfg.bot_token.split(":")[0])
+            deleted = await _delete_managed_bot(BOT_TOKEN, child_user_id)
+            if deleted:
+                logger.info("mybots: managed bot {} deleted from Telegram", child_user_id)
+            else:
+                logger.debug("mybots: deleteManagedBot returned false for bot_id={} (likely BotFather bot)", bot_id)
+        except Exception:
+            logger.exception("mybots: delete_managed_bot failed bot_id={}", bot_id)
     try:
         ok = await delete_bot(bot_id, client.id)
     except Exception:
