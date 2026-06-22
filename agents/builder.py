@@ -118,6 +118,29 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * Функция `_make_reply_keyboard()`: если QUICK_REPLIES пустой — `ReplyKeyboardRemove()`, иначе — `ReplyKeyboardMarkup` с кнопками по 2 в ряд, `resize_keyboard=True, persistent=True`
   * В `/start`: `await message.answer(GREETING, reply_markup=_make_reply_keyboard())`
   * Файл `quick_replies.json` уже лежит в /app (может быть `[]` — тогда клавиатура скрыта)
+- Google Sheets интеграция:
+  * `SHEETS_WEBHOOK = Path("/app/sheets_webhook.txt").read_text(encoding="utf-8").strip()`
+  * Если SHEETS_WEBHOOK не пустой: в каждом message-хендлере (кроме /start) до LLM-вызова добавь fire-and-forget:
+    `asyncio.create_task(_fire_sheets(message))`
+  * Реализуй `_fire_sheets` так (используй тот же aiohttp.ClientSession):
+    ```python
+    async def _fire_sheets(message) -> None:
+        if not SHEETS_WEBHOOK:
+            return
+        u = message.from_user
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(SHEETS_WEBHOOK, json={
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "telegram_id": u.id if u else None,
+                    "username": u.username if u else None,
+                    "first_name": u.first_name if u else None,
+                    "text": message.text or "",
+                }, timeout=aiohttp.ClientTimeout(total=5))
+        except Exception as e:
+            logger.warning("sheets: {}", e)
+    ```
+  * Файл `sheets_webhook.txt` уже лежит в /app
 - Telegram Stars платежи:
   * `PAYMENT_PRODUCTS: list[dict] = json.loads(Path("/app/payment_products.json").read_text(encoding="utf-8"))`
   * Формат товара: `{"name": str, "description": str, "price_stars": int}`

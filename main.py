@@ -49,6 +49,7 @@ from deployer import (
     write_bot_rate_limit,
     write_bot_quick_replies,
     write_bot_payment_products,
+    write_bot_sheets_webhook,
 )
 from db.repository import (
     anonymize_user,
@@ -330,6 +331,10 @@ class PaymentProductStates(StatesGroup):
     adding_name = State()
     adding_description = State()
     adding_price = State()
+
+
+class SheetsStates(StatesGroup):
+    waiting_url = State()
 
 
 class BlacklistStates(StatesGroup):
@@ -2720,6 +2725,12 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
                     callback_data=f"bot:products:{bot.id}",
                 ),
                 InlineKeyboardButton(
+                    text="📊 Google Sheets",
+                    callback_data=f"bot:sheets:{bot.id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     text="🔁 Клонировать",
                     callback_data=f"bot:clone:{bot.id}",
                 ),
@@ -3591,6 +3602,133 @@ async def cb_prod_delete(callback: CallbackQuery) -> None:
                 reply_markup=_products_keyboard(bot_id, products),
             )
         await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets integration
+# ---------------------------------------------------------------------------
+
+_APPS_SCRIPT_TEMPLATE = """\
+📋 Шаблон Google Apps Script:
+
+1. Откройте Google Таблицу → Расширения → Apps Script
+2. Вставьте код:
+
+function doPost(e) {
+  var data = JSON.parse(e.postData.contents);
+  var sheet = SpreadsheetApp.getActiveSheet();
+  sheet.appendRow([
+    data.timestamp,
+    data.telegram_id,
+    data.username,
+    data.first_name,
+    data.text
+  ]);
+  return ContentService.createTextOutput("ok");
+}
+
+3. Сохраните → Развернуть → Новое развёртывание
+4. Тип: Веб-приложение, Доступ: Все
+5. Скопируйте URL и вставьте сюда\
+"""
+
+
+@router.callback_query(F.data.startswith("bot:sheets:"))
+async def cb_bot_sheets(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    client = await get_or_create_client(callback.from_user.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    current_url = (bot_cfg.config_json or {}).get("sheets_webhook", "")
+    status = f"✅ Подключено\n{current_url[:60]}{'…' if len(current_url) > 60 else ''}" if current_url else "❌ Не подключено"
+
+    rows = []
+    if current_url:
+        rows.append([InlineKeyboardButton(
+            text="❌ Отключить",
+            callback_data=f"sheets:disable:{bot_id}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="🔗 Подключить / изменить URL",
+        callback_data=f"sheets:connect:{bot_id}",
+    )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:detail:{bot_id}")])
+
+    if callback.message is not None:
+        await callback.message.answer(
+            f"📊 Google Sheets — «{bot_cfg.bot_name}»\nСтатус: {status}\n\n"
+            "Каждое сообщение пользователя будет записываться в вашу таблицу.\n\n"
+            f"{_APPS_SCRIPT_TEMPLATE}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sheets:connect:"))
+async def cb_sheets_connect(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    await state.set_state(SheetsStates.waiting_url)
+    await state.update_data(sheets_bot_id=bot_id)
+    if callback.message is not None:
+        await callback.message.answer(
+            "📊 Вставьте URL вашего Google Apps Script Webhook:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="sheets:cancel")
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sheets:disable:"))
+async def cb_sheets_disable(callback: CallbackQuery) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    client = await get_or_create_client(callback.from_user.id)
+    await update_bot_config(bot_id, client.id, "sheets_webhook", "")
+    try:
+        await asyncio.to_thread(write_bot_sheets_webhook, bot_id, "")
+        await redeploy_bot(bot_id)
+        if callback.message is not None:
+            await callback.message.answer("✅ Google Sheets отключён. Бот перезапущен.")
+    except Exception:
+        logger.exception("cb_sheets_disable: redeploy failed bot_id={}", bot_id)
+        if callback.message is not None:
+            await callback.message.answer("✅ Google Sheets отключён в настройках.\n⚠️ Перезапуск не удался.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sheets:cancel")
+async def cb_sheets_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.answer("Отменено.")
+    await callback.answer()
+
+
+@router.message(SheetsStates.waiting_url, F.text)
+async def on_sheets_url(message: Message, state: FSMContext) -> None:
+    url = (message.text or "").strip()
+    if not url.startswith("https://"):
+        await message.answer("URL должен начинаться с https://. Попробуйте ещё раз.")
+        return
+    data = await state.get_data()
+    bot_id = data.get("sheets_bot_id")
+    if not bot_id:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots")
+        return
+    client = await get_or_create_client(message.from_user.id)
+    await update_bot_config(bot_id, client.id, "sheets_webhook", url)
+    await state.clear()
+    try:
+        await asyncio.to_thread(write_bot_sheets_webhook, bot_id, url)
+        await redeploy_bot(bot_id)
+        await message.answer("✅ Google Sheets подключён! Бот перезапущен и начнёт записывать сообщения.")
+    except Exception:
+        logger.exception("on_sheets_url: redeploy failed bot_id={}", bot_id)
+        await message.answer("✅ URL сохранён.\n⚠️ Перезапуск не удался — попробуйте через /mybots.")
 
 
 def _schedule_list_keyboard(bot_id: int, broadcasts: list) -> InlineKeyboardMarkup:

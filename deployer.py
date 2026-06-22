@@ -62,6 +62,7 @@ COPY triggers.json /app/triggers.json
 COPY rate_limit.txt /app/rate_limit.txt
 COPY quick_replies.json /app/quick_replies.json
 COPY payment_products.json /app/payment_products.json
+COPY sheets_webhook.txt /app/sheets_webhook.txt
 
 CMD ["python", "main.py"]
 """
@@ -100,6 +101,8 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
         (bot_dir / "quick_replies.json").write_text("[]", encoding="utf-8")
     if not (bot_dir / "payment_products.json").exists():
         (bot_dir / "payment_products.json").write_text("[]", encoding="utf-8")
+    if not (bot_dir / "sheets_webhook.txt").exists():
+        (bot_dir / "sheets_webhook.txt").write_text("", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -181,6 +184,13 @@ def write_bot_payment_products(bot_id: int, products: list[dict]) -> None:
     (bot_dir / "payment_products.json").write_text(
         _json.dumps(products, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def write_bot_sheets_webhook(bot_id: int, url: str) -> None:
+    """Write sheets_webhook.txt for the bot. Empty string disables Google Sheets export."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "sheets_webhook.txt").write_text(url or "", encoding="utf-8")
 
 
 def write_bot_webhook_url(bot_id: int, url: str) -> None:
