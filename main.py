@@ -48,6 +48,7 @@ from deployer import (
     write_bot_triggers,
     write_bot_rate_limit,
     write_bot_quick_replies,
+    write_bot_payment_products,
 )
 from db.repository import (
     anonymize_user,
@@ -323,6 +324,12 @@ class BroadcastStates(StatesGroup):
 
 class SubscriberStates(StatesGroup):
     waiting_assignment = State()
+
+
+class PaymentProductStates(StatesGroup):
+    adding_name = State()
+    adding_description = State()
+    adding_price = State()
 
 
 class BlacklistStates(StatesGroup):
@@ -2709,6 +2716,10 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="💳 Товары (Stars)",
+                    callback_data=f"bot:products:{bot.id}",
+                ),
+                InlineKeyboardButton(
                     text="🔁 Клонировать",
                     callback_data=f"bot:clone:{bot.id}",
                 ),
@@ -3392,6 +3403,194 @@ async def on_sub_assignment(message: Message, state: FSMContext) -> None:
         await message.answer(f"✅ Сегмент {label} установлен для {tg_id}.")
     else:
         await message.answer("❌ Подписчик не найден у этого бота.")
+
+
+# ---------------------------------------------------------------------------
+# Payment products (Telegram Stars)
+# ---------------------------------------------------------------------------
+
+def _products_keyboard(bot_id: int, products: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for i, p in enumerate(products):
+        rows.append([
+            InlineKeyboardButton(
+                text=f"⭐ {p['name']} — {p['price_stars']} Stars",
+                callback_data=f"prod:noop:{bot_id}:{i}",
+            ),
+            InlineKeyboardButton(text="🗑", callback_data=f"prod:del:{bot_id}:{i}"),
+        ])
+    rows.append([InlineKeyboardButton(
+        text="➕ Добавить товар",
+        callback_data=f"prod:add:{bot_id}",
+    )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:detail:{bot_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("bot:products:"))
+async def cb_bot_products(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    client = await get_or_create_client(callback.from_user.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    products: list[dict] = (bot_cfg.config_json or {}).get("payment_products", [])
+    header = (
+        f"💳 Товары для оплаты Stars\nБот: «{bot_cfg.bot_name}»\n\n"
+        "Покупатели оплачивают прямо в Telegram ⭐ Stars.\n"
+        "Добавьте товары — бот получит команду /buy."
+    )
+    if callback.message is not None:
+        await callback.message.answer(
+            header,
+            reply_markup=_products_keyboard(bot_id, products),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod:add:"))
+async def cb_prod_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    await state.set_state(PaymentProductStates.adding_name)
+    await state.update_data(prod_bot_id=bot_id)
+    if callback.message is not None:
+        await callback.message.answer(
+            "💳 Новый товар (шаг 1/3)\nВведите название товара:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="prod:cancel")
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "prod:cancel")
+async def cb_prod_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.answer("Отменено.")
+    await callback.answer()
+
+
+@router.message(PaymentProductStates.adding_name, F.text)
+async def on_prod_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Название не может быть пустым.")
+        return
+    await state.update_data(prod_name=name)
+    await state.set_state(PaymentProductStates.adding_description)
+    await message.answer(
+        "💳 Новый товар (шаг 2/3)\nВведите описание товара:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="prod:cancel")
+        ]]),
+    )
+
+
+@router.message(PaymentProductStates.adding_description, F.text)
+async def on_prod_description(message: Message, state: FSMContext) -> None:
+    desc = (message.text or "").strip()
+    if not desc:
+        await message.answer("Описание не может быть пустым.")
+        return
+    await state.update_data(prod_description=desc)
+    await state.set_state(PaymentProductStates.adding_price)
+    await message.answer(
+        "💳 Новый товар (шаг 3/3)\nВведите цену в Stars (целое число, например: 100):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="prod:cancel")
+        ]]),
+    )
+
+
+@router.message(PaymentProductStates.adding_price, F.text)
+async def on_prod_price(message: Message, state: FSMContext) -> None:
+    try:
+        price = int((message.text or "").strip())
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите целое число больше 0.")
+        return
+
+    data = await state.get_data()
+    bot_id = data.get("prod_bot_id")
+    if not bot_id:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots")
+        return
+
+    client = await get_or_create_client(message.from_user.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await state.clear()
+        await message.answer("Бот не найден.")
+        return
+
+    products: list[dict] = list((bot_cfg.config_json or {}).get("payment_products", []))
+    new_product = {
+        "name": data["prod_name"],
+        "description": data["prod_description"],
+        "price_stars": price,
+    }
+    products.append(new_product)
+    await update_bot_config(bot_id, client.id, "payment_products", products)
+    await state.clear()
+
+    try:
+        await asyncio.to_thread(write_bot_payment_products, bot_id, products)
+        await redeploy_bot(bot_id)
+        await message.answer(
+            f"✅ Товар «{new_product['name']}» добавлен.\n"
+            f"⭐ Цена: {price} Stars\nБот перезапущен с поддержкой /buy.",
+        )
+    except Exception:
+        logger.exception("on_prod_price: redeploy failed bot_id={}", bot_id)
+        await message.answer(
+            f"✅ Товар «{new_product['name']}» сохранён в настройках.\n"
+            "⚠️ Перезапуск бота не удался — попробуйте позже через /mybots."
+        )
+
+
+@router.callback_query(F.data.startswith("prod:del:"))
+async def cb_prod_delete(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    bot_id = int(parts[2])
+    idx = int(parts[3])
+    client = await get_or_create_client(callback.from_user.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    products: list[dict] = list((bot_cfg.config_json or {}).get("payment_products", []))
+    if idx < 0 or idx >= len(products):
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+
+    removed = products.pop(idx)
+    await update_bot_config(bot_id, client.id, "payment_products", products)
+
+    try:
+        await asyncio.to_thread(write_bot_payment_products, bot_id, products)
+        await redeploy_bot(bot_id)
+        if callback.message is not None:
+            await callback.message.answer(
+                f"🗑 Товар «{removed['name']}» удалён. Бот перезапущен.",
+                reply_markup=_products_keyboard(bot_id, products),
+            )
+        await callback.answer()
+    except Exception:
+        logger.exception("cb_prod_delete: redeploy failed bot_id={}", bot_id)
+        if callback.message is not None:
+            await callback.message.answer(
+                f"🗑 Товар «{removed['name']}» удалён из настроек.\n"
+                "⚠️ Перезапуск не удался.",
+                reply_markup=_products_keyboard(bot_id, products),
+            )
+        await callback.answer()
 
 
 def _schedule_list_keyboard(bot_id: int, broadcasts: list) -> InlineKeyboardMarkup:

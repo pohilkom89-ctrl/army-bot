@@ -118,6 +118,16 @@ BUILDER_SYSTEM_PROMPT = """Ты — senior Python-разработчик, пиш
   * Функция `_make_reply_keyboard()`: если QUICK_REPLIES пустой — `ReplyKeyboardRemove()`, иначе — `ReplyKeyboardMarkup` с кнопками по 2 в ряд, `resize_keyboard=True, persistent=True`
   * В `/start`: `await message.answer(GREETING, reply_markup=_make_reply_keyboard())`
   * Файл `quick_replies.json` уже лежит в /app (может быть `[]` — тогда клавиатура скрыта)
+- Telegram Stars платежи:
+  * `PAYMENT_PRODUCTS: list[dict] = json.loads(Path("/app/payment_products.json").read_text(encoding="utf-8"))`
+  * Формат товара: `{"name": str, "description": str, "price_stars": int}`
+  * Если PAYMENT_PRODUCTS не пустой:
+    - Импортируй `from aiogram.types import LabeledPrice`
+    - Хендлер `/buy`: строй InlineKeyboard — одна кнопка на товар с callback_data `f"pay_{i}"`, зарегистрируй ПЕРЕД catch-all
+    - Хендлер `F.data.startswith("pay_")`: извлеки индекс → `await message.bot.send_invoice(message.chat.id, title=p["name"], description=p["description"], payload=f"product_{i}", currency="XTR", prices=[LabeledPrice(label=p["name"], amount=p["price_stars"])])`
+    - Хендлер `pre_checkout_query`: `await callback.bot.answer_pre_checkout_query(callback.id, ok=True)`
+    - Хендлер `successful_payment F.successful_payment`: `await message.answer("✅ Оплата получена! Спасибо за покупку.")`
+  * Если PAYMENT_PRODUCTS пустой — команду /buy и хендлеры платежей НЕ добавляй
 - Логирование — ТОЛЬКО через loguru: `from loguru import logger`
   * никакого print
   * при старте — logger.info о запуске бота

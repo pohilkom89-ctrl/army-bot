@@ -61,6 +61,7 @@ COPY crm_type.txt /app/crm_type.txt
 COPY triggers.json /app/triggers.json
 COPY rate_limit.txt /app/rate_limit.txt
 COPY quick_replies.json /app/quick_replies.json
+COPY payment_products.json /app/payment_products.json
 
 CMD ["python", "main.py"]
 """
@@ -97,6 +98,8 @@ def prepare_bot_files(bot_code: str, bot_id: int) -> Path:
         (bot_dir / "rate_limit.txt").write_text("0", encoding="utf-8")
     if not (bot_dir / "quick_replies.json").exists():
         (bot_dir / "quick_replies.json").write_text("[]", encoding="utf-8")
+    if not (bot_dir / "payment_products.json").exists():
+        (bot_dir / "payment_products.json").write_text("[]", encoding="utf-8")
     _write_dockerfile(bot_id)
     _ensure_runtime_files(bot_dir)
     logger.info("deployer: prepared files for bot_id={}", bot_id)
@@ -167,6 +170,16 @@ def write_bot_triggers(bot_id: int, triggers: dict[str, str]) -> None:
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "triggers.json").write_text(
         _json.dumps(triggers, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def write_bot_payment_products(bot_id: int, products: list[dict]) -> None:
+    """Write payment_products.json for the bot. Empty list disables /buy."""
+    import json as _json
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "payment_products.json").write_text(
+        _json.dumps(products, ensure_ascii=False), encoding="utf-8"
     )
 
 
