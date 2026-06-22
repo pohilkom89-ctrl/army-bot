@@ -94,9 +94,17 @@ MODELS: dict[str, str] = {
     "cheap": "meta-llama/llama-3.3-70b-instruct",  # $0.12/1M
     "balanced": "deepseek/deepseek-chat-v3.1",     # $0.28/1M
     "smart": "qwen/qwen3-235b-a22b",               # $0.54/1M
+    # "yandex:" prefix signals pipeline._chat to use the Yandex client.
+    "yandex_lite": "yandex:yandexgpt-lite",        # ~$0.40/1M (RU data center)
+    "yandex_pro": "yandex:yandexgpt-pro",          # ~$1.20/1M (RU data center)
 }
 
-MODEL_STRATEGIES: tuple[str, ...] = ("auto", "smart", "cheap")
+_yandex_enabled = bool(settings.yandex_api_key and settings.yandex_folder_id)
+
+MODEL_STRATEGIES: tuple[str, ...] = (
+    "auto", "smart", "cheap",
+    *( ("yandex_lite", "yandex_pro") if _yandex_enabled else () ),
+)
 
 
 # Per-container resource caps for generated client bots. Conservative MVP

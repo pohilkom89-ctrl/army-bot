@@ -1482,11 +1482,13 @@ async def _render_usage_main(
     return text, _usage_main_keyboard()
 
 
-_TIER_EMOJI = {"cheap": "💚", "balanced": "💛", "smart": "❤️"}
+_TIER_EMOJI = {"cheap": "💚", "balanced": "💛", "smart": "❤️", "yandex_lite": "🇷🇺", "yandex_pro": "🇷🇺"}
 _TIER_RU = {
     "cheap": "Дешёвая",
     "balanced": "Сбалансированная",
     "smart": "Умная",
+    "yandex_lite": "YandexGPT Lite",
+    "yandex_pro": "YandexGPT Pro",
 }
 
 
@@ -1617,6 +1619,8 @@ _STRATEGY_META: dict[str, tuple[str, str]] = {
     "auto": ("🚀 Автоматически (экономия)", "Автоматически"),
     "smart": ("💎 Всегда умная", "Всегда умная"),
     "cheap": ("💰 Всегда дешёвая", "Всегда дешёвая"),
+    "yandex_lite": ("🇷🇺 YandexGPT Lite", "YandexGPT Lite"),
+    "yandex_pro": ("🇷🇺 YandexGPT Pro", "YandexGPT Pro"),
 }
 
 
@@ -1651,7 +1655,8 @@ def _settings_text(bot_cfg, current: str) -> str:
         "Стратегия выбора модели:\n"
         "• 🚀 Автоматически — роутер выбирает дешёвую/среднюю/умную под каждый запрос\n"
         "• 💎 Всегда умная — качество важнее стоимости\n"
-        "• 💰 Всегда дешёвая — максимальная экономия токенов\n\n"
+        "• 💰 Всегда дешёвая — максимальная экономия токенов\n"
+        "• 🇷🇺 YandexGPT — российская нейросеть, данные не покидают РФ\n\n"
         f"Текущая: {current_label}"
     )
 
@@ -2675,9 +2680,13 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
                     text="💬 Диалоги",
                     callback_data=f"bot:conversations:{bot.id}",
                 ),
-                InlineKeyboardButton(
-                    text="📚 База знаний",
-                    callback_data=f"bot:library_info:{bot.id}",
+                *(
+                    [InlineKeyboardButton(
+                        text="📚 База знаний",
+                        callback_data=f"bot:library_info:{bot.id}",
+                    )]
+                    if bot.platform != "vk"
+                    else []
                 ),
             ],
             [
@@ -5079,6 +5088,8 @@ async def _handle_chat_text(
             tier = "smart"
         elif strategy == "cheap":
             tier = "cheap"
+        elif strategy in ("yandex_lite", "yandex_pro"):
+            tier = strategy
         else:
             # Lazy import — avoids loading agents.router at module level and
             # mirrors how other agent modules reach into pipeline.

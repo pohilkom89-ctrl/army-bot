@@ -59,6 +59,9 @@ def _record_usage(model: str, response: Any) -> None:
 
 
 _client: OpenAI | None = None
+_yandex_client: OpenAI | None = None
+
+_YANDEX_BASE_URL = "https://llm.api.cloud.yandex.net/v1"
 
 
 def _get_client() -> OpenAI:
@@ -69,6 +72,21 @@ def _get_client() -> OpenAI:
             raise RuntimeError("OPENROUTER_API_KEY env var is required")
         _client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
     return _client
+
+
+def _get_yandex_client() -> OpenAI:
+    global _yandex_client
+    if _yandex_client is None:
+        api_key = settings.yandex_api_key
+        folder_id = settings.yandex_folder_id
+        if not api_key or not folder_id:
+            raise RuntimeError("YANDEX_API_KEY and YANDEX_FOLDER_ID are required")
+        _yandex_client = OpenAI(
+            api_key=api_key,
+            base_url=_YANDEX_BASE_URL,
+            default_headers={"x-folder-id": folder_id},
+        )
+    return _yandex_client
 
 
 @dataclass
@@ -82,16 +100,22 @@ class BotSpec:
 
 
 def _chat(model: str, system: str, user_message: str) -> str:
-    client = _get_client()
+    # "yandex:<slug>" → Yandex AI Studio client; everything else → OpenRouter.
+    if model.startswith("yandex:"):
+        client = _get_yandex_client()
+        real_model = model[len("yandex:"):]
+    else:
+        client = _get_client()
+        real_model = model
     response = client.chat.completions.create(
-        model=model,
+        model=real_model,
         max_tokens=MAX_TOKENS,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user_message},
         ],
     )
-    _record_usage(model, response)
+    _record_usage(real_model, response)
     content = response.choices[0].message.content or ""
     return content.strip()
 

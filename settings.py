@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     factory_url: str = "http://host.docker.internal:8080"
     internal_api_key: str = ""
 
+    # YandexGPT (optional — enables yandex_lite / yandex_pro model strategies)
+    yandex_api_key: str | None = None
+    yandex_folder_id: str | None = None
+
     # Image generation (FusionBrain)
     fusionbrain_api_key: str | None = None
     fusionbrain_secret_key: str | None = None

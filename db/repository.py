@@ -27,6 +27,10 @@ MODEL_PRICING_USD_PER_1M: dict[str, float] = {
     "meta-llama/llama-3.3-70b-instruct": 0.12,
     "deepseek/deepseek-chat-v3.1": 0.28,
     "qwen/qwen3-235b-a22b": 0.54,
+    # Yandex AI Studio — approximate USD prices, billed by Yandex in RUB.
+    # Update when USD/RUB rate or Yandex pricing changes.
+    "yandexgpt-lite": 0.40,
+    "yandexgpt-pro": 1.20,
 }
 
 TOKEN_RESET_PERIOD = timedelta(days=30)

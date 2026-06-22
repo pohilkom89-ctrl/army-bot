@@ -141,3 +141,28 @@ async def test_search_knowledge_without_bot_type_skips_library(fresh_db):
         )
     # No client chunks and no bot_type → empty
     assert results == []
+
+
+def _make_mock_bot(platform: str, bot_id: int = 1):
+    from unittest.mock import MagicMock
+    bot = MagicMock()
+    bot.id = bot_id
+    bot.platform = platform
+    bot.status = "active"
+    return bot
+
+
+def test_bot_detail_keyboard_telegram_has_library_button():
+    """Telegram bots show the '📚 База знаний' button."""
+    from main import _bot_detail_keyboard
+    kb = _bot_detail_keyboard(_make_mock_bot("telegram"))
+    texts = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert any("База знаний" in t for t in texts)
+
+
+def test_bot_detail_keyboard_vk_hides_library_button():
+    """VK bots must NOT show the '📚 База знаний' button — library is Telegram-only."""
+    from main import _bot_detail_keyboard
+    kb = _bot_detail_keyboard(_make_mock_bot("vk"))
+    texts = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert not any("База знаний" in t for t in texts)
