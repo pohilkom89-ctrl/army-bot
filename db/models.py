@@ -224,6 +224,7 @@ class BotSubscriber(Base):
     )
     telegram_id = Column(BigInteger, nullable=False)
     joined_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    segment = Column(String(64), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("bot_id", "telegram_id", name="uq_bot_subscriber"),

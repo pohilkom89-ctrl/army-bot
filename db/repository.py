@@ -302,9 +302,12 @@ async def rename_bot(bot_id: int, client_id: int, new_name: str) -> bool:
         return True
 
 
-async def upsert_subscriber(bot_id: int, telegram_id: int) -> bool:
+async def upsert_subscriber(
+    bot_id: int, telegram_id: int, segment: str | None = None
+) -> bool:
     """Record that telegram_id has interacted with bot_id. Returns True if
-    this is a new subscriber, False if already known. Dialect-neutral."""
+    this is a new subscriber, False if already known. If segment is provided
+    it is set (or updated) on the row."""
     async with get_session() as session:
         existing = await session.scalar(
             select(BotSubscriber.id).where(
@@ -313,9 +316,56 @@ async def upsert_subscriber(bot_id: int, telegram_id: int) -> bool:
             )
         )
         if existing is None:
-            session.add(BotSubscriber(bot_id=bot_id, telegram_id=telegram_id))
+            session.add(BotSubscriber(bot_id=bot_id, telegram_id=telegram_id, segment=segment))
             return True
+        if segment is not None:
+            await session.execute(
+                update(BotSubscriber)
+                .where(BotSubscriber.id == existing)
+                .values(segment=segment)
+            )
         return False
+
+
+async def get_segments_for_bot(bot_id: int) -> list[dict[str, Any]]:
+    """Return non-null segments with subscriber counts, sorted by count desc."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotSubscriber.segment, func.count(BotSubscriber.id).label("cnt"))
+            .where(BotSubscriber.bot_id == bot_id, BotSubscriber.segment.isnot(None))
+            .group_by(BotSubscriber.segment)
+            .order_by(func.count(BotSubscriber.id).desc())
+        )
+        return [{"segment": row.segment, "count": row.cnt} for row in result.all()]
+
+
+async def get_subscriber_ids_by_segment(
+    bot_id: int, segment: str | None = None
+) -> list[int]:
+    """Return subscriber telegram_ids for bot_id. If segment is given, filter
+    to only that segment; otherwise return all subscribers."""
+    async with get_session() as session:
+        q = select(BotSubscriber.telegram_id).where(BotSubscriber.bot_id == bot_id)
+        if segment is not None:
+            q = q.where(BotSubscriber.segment == segment)
+        rows = await session.execute(q)
+        return [r for (r,) in rows.all()]
+
+
+async def set_subscriber_segment(
+    bot_id: int, telegram_id: int, segment: str | None
+) -> bool:
+    """Assign or clear a segment for a subscriber. Returns False if not found."""
+    async with get_session() as session:
+        result = await session.execute(
+            update(BotSubscriber)
+            .where(
+                BotSubscriber.bot_id == bot_id,
+                BotSubscriber.telegram_id == telegram_id,
+            )
+            .values(segment=segment)
+        )
+        return (result.rowcount or 0) > 0
 
 
 async def get_bot_owner_telegram_id(bot_id: int) -> int | None:

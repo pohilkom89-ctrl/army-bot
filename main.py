@@ -82,6 +82,9 @@ from db.repository import (
     set_limit_alerts,
     count_subscribers,
     get_subscriber_ids,
+    get_subscriber_ids_by_segment,
+    get_segments_for_bot,
+    set_subscriber_segment,
     rename_bot,
     update_bot_config,
     update_bot_system_prompt,
@@ -311,10 +314,15 @@ class MergeStates(StatesGroup):
 
 
 class BroadcastStates(StatesGroup):
+    choosing_segment = State()
     waiting_content = State()
     waiting_url = State()
     confirming = State()
     sending = State()
+
+
+class SubscriberStates(StatesGroup):
+    waiting_assignment = State()
 
 
 class BlacklistStates(StatesGroup):
@@ -2691,9 +2699,15 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="👥 Подписчики",
+                    callback_data=f"bot:subscribers:{bot.id}",
+                ),
+                InlineKeyboardButton(
                     text="📅 Расписание",
                     callback_data=f"bot:schedule:{bot.id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="🔁 Клонировать",
                     callback_data=f"bot:clone:{bot.id}",
@@ -3035,17 +3049,43 @@ async def cb_bot_broadcast_start(callback: CallbackQuery, state: FSMContext) -> 
             )
         await callback.answer()
         return
-    await state.set_state(BroadcastStates.waiting_content)
-    await state.update_data(broadcast_bot_id=bot_id, broadcast_bot_token=bot_cfg.bot_token)
-    if callback.message is not None:
-        await callback.message.answer(
-            f"📢 Рассылка для бота «{bot_cfg.bot_name}»\n"
-            f"Подписчиков: {_format_num(sub_count)}\n\n"
-            "Пришлите текст сообщения для рассылки.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")
-            ]]),
-        )
+
+    segments = await get_segments_for_bot(bot_id)
+    await state.update_data(
+        broadcast_bot_id=bot_id,
+        broadcast_bot_token=bot_cfg.bot_token,
+        broadcast_segment=None,
+    )
+
+    if segments:
+        await state.set_state(BroadcastStates.choosing_segment)
+        rows = [[InlineKeyboardButton(
+            text=f"👥 Все подписчики ({_format_num(sub_count)})",
+            callback_data="broadcast:seg:all",
+        )]]
+        for seg in segments:
+            rows.append([InlineKeyboardButton(
+                text=f"🏷 {seg['segment']} ({_format_num(seg['count'])})",
+                callback_data=f"broadcast:seg:{seg['segment']}",
+            )])
+        rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")])
+        if callback.message is not None:
+            await callback.message.answer(
+                f"📢 Рассылка для бота «{bot_cfg.bot_name}»\nКому отправить?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+    else:
+        await state.update_data(broadcast_sub_count=sub_count)
+        await state.set_state(BroadcastStates.waiting_content)
+        if callback.message is not None:
+            await callback.message.answer(
+                f"📢 Рассылка для бота «{bot_cfg.bot_name}»\n"
+                f"Подписчиков: {_format_num(sub_count)}\n\n"
+                "Пришлите текст сообщения для рассылки.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")
+                ]]),
+            )
     await callback.answer()
 
 
@@ -3055,6 +3095,33 @@ async def cb_broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer("Рассылка отменена")
     if callback.message is not None:
         await callback.message.answer("Рассылка отменена. /mybots")
+
+
+@router.callback_query(F.data.startswith("broadcast:seg:"), BroadcastStates.choosing_segment)
+async def cb_broadcast_choose_segment(callback: CallbackQuery, state: FSMContext) -> None:
+    raw = callback.data[len("broadcast:seg:"):]
+    segment: str | None = None if raw == "all" else raw
+    data = await state.get_data()
+    bot_id = data.get("broadcast_bot_id")
+    if not bot_id:
+        await state.clear()
+        await callback.answer("Сессия потеряна", show_alert=True)
+        return
+
+    sub_count = len(await get_subscriber_ids_by_segment(bot_id, segment))
+    await state.update_data(broadcast_segment=segment, broadcast_sub_count=sub_count)
+    await state.set_state(BroadcastStates.waiting_content)
+
+    seg_label = f"сегмент «{segment}»" if segment else "все подписчики"
+    if callback.message is not None:
+        await callback.message.answer(
+            f"📢 {seg_label.capitalize()} — {_format_num(sub_count)} чел.\n\n"
+            "Пришлите текст или фото для рассылки.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")
+            ]]),
+        )
+    await callback.answer()
 
 
 def _broadcast_confirm_kb(sub_count: int, has_btn: bool) -> InlineKeyboardMarkup:
@@ -3113,7 +3180,10 @@ async def on_broadcast_content(message: Message, state: FSMContext) -> None:
         photo_id = None
         caption = ""
 
-    sub_count = len(await get_subscriber_ids(bot_id))
+    segment = data.get("broadcast_segment")
+    sub_count = data.get("broadcast_sub_count") or len(
+        await get_subscriber_ids_by_segment(bot_id, segment)
+    )
     await state.update_data(
         broadcast_content_type=content_type,
         broadcast_text=text,
@@ -3183,7 +3253,8 @@ async def cb_broadcast_do_send(callback: CallbackQuery, state: FSMContext) -> No
         await callback.answer("Сессия потеряна", show_alert=True)
         return
 
-    subscriber_ids = await get_subscriber_ids(bot_id)
+    segment = data.get("broadcast_segment")
+    subscriber_ids = await get_subscriber_ids_by_segment(bot_id, segment)
     if not subscriber_ids:
         await state.clear()
         await callback.answer("Подписчиков не найдено", show_alert=True)
@@ -3231,6 +3302,96 @@ async def cb_broadcast_do_send(callback: CallbackQuery, state: FSMContext) -> No
         f"• Доставлено: {_format_num(sent)}\n"
         f"• Ошибок (бот заблокирован/не найден): {_format_num(failed)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Subscriber management
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("bot:subscribers:"))
+async def cb_bot_subscribers(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    client = await get_or_create_client(callback.from_user.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    sub_count = await count_subscribers(bot_id)
+    segments = await get_segments_for_bot(bot_id)
+
+    lines = [f"👥 Подписчики «{bot_cfg.bot_name}»", f"\nВсего: {_format_num(sub_count)}"]
+    if segments:
+        lines.append("\nСегменты:")
+        for seg in segments:
+            lines.append(f"  🏷 {seg['segment']}: {_format_num(seg['count'])}")
+    else:
+        lines.append("\nСегменты ещё не назначены.")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🏷 Назначить сегмент подписчику",
+            callback_data=f"sub:assign:{bot_id}",
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"bot:detail:{bot_id}")],
+    ])
+    if callback.message is not None:
+        await callback.message.answer("\n".join(lines), reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sub:assign:"))
+async def cb_sub_assign_start(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    await state.set_state(SubscriberStates.waiting_assignment)
+    await state.update_data(assign_bot_id=bot_id)
+    if callback.message is not None:
+        await callback.message.answer(
+            "🏷 Укажите Telegram ID и сегмент через пробел:\n"
+            "  <code>123456789 VIP</code>\n\n"
+            "Для удаления сегмента:\n"
+            "  <code>123456789 -</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="sub:cancel")
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sub:cancel")
+async def cb_sub_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.answer("Отменено.")
+    await callback.answer()
+
+
+@router.message(SubscriberStates.waiting_assignment, F.text)
+async def on_sub_assignment(message: Message, state: FSMContext) -> None:
+    parts = (message.text or "").strip().split(None, 1)
+    if len(parts) < 2:
+        await message.answer("Укажите ID и сегмент через пробел. Пример: 123456789 VIP")
+        return
+    try:
+        tg_id = int(parts[0])
+    except ValueError:
+        await message.answer("Telegram ID должен быть числом.")
+        return
+    segment: str | None = None if parts[1].strip() == "-" else parts[1].strip()
+    data = await state.get_data()
+    bot_id = data.get("assign_bot_id")
+    if not bot_id:
+        await state.clear()
+        await message.answer("Сессия потеряна. /mybots")
+        return
+    ok = await set_subscriber_segment(bot_id, tg_id, segment)
+    await state.clear()
+    if ok:
+        label = f"«{segment}»" if segment else "удалён"
+        await message.answer(f"✅ Сегмент {label} установлен для {tg_id}.")
+    else:
+        await message.answer("❌ Подписчик не найден у этого бота.")
 
 
 def _schedule_list_keyboard(bot_id: int, broadcasts: list) -> InlineKeyboardMarkup:

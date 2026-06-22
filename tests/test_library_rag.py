@@ -166,3 +166,100 @@ def test_bot_detail_keyboard_vk_hides_library_button():
     kb = _bot_detail_keyboard(_make_mock_bot("vk"))
     texts = [btn.text for row in kb.inline_keyboard for btn in row]
     assert not any("База знаний" in t for t in texts)
+
+
+def test_bot_detail_keyboard_has_subscribers_button():
+    """All bots show the '👥 Подписчики' button."""
+    from main import _bot_detail_keyboard
+    kb = _bot_detail_keyboard(_make_mock_bot("telegram"))
+    texts = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert any("Подписчики" in t for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# Wave 39: subscriber segments
+# ---------------------------------------------------------------------------
+
+async def test_get_segments_empty(fresh_db):
+    """No segments returned for a bot with untagged subscribers."""
+    from db.repository import get_segments_for_bot, upsert_subscriber, get_or_create_client, save_bot_config
+    client = await get_or_create_client(7001, None)
+    bot = await save_bot_config(client.id, "SegBot1", "coach", "7001:FAKE", "sys", {})
+    await upsert_subscriber(bot.id, 10001)
+    segs = await get_segments_for_bot(bot.id)
+    assert segs == []
+
+
+async def test_get_segments_with_tagged_subscribers(fresh_db):
+    """get_segments_for_bot returns segments with correct counts."""
+    from db.repository import (
+        get_segments_for_bot, set_subscriber_segment, upsert_subscriber,
+        get_or_create_client, save_bot_config,
+    )
+    client = await get_or_create_client(7002, None)
+    bot = await save_bot_config(client.id, "SegBot2", "coach", "7002:FAKE", "sys", {})
+    await upsert_subscriber(bot.id, 20001)
+    await upsert_subscriber(bot.id, 20002)
+    await upsert_subscriber(bot.id, 20003)
+    await set_subscriber_segment(bot.id, 20001, "VIP")
+    await set_subscriber_segment(bot.id, 20002, "VIP")
+    await set_subscriber_segment(bot.id, 20003, "Новый")
+    segs = await get_segments_for_bot(bot.id)
+    seg_map = {s["segment"]: s["count"] for s in segs}
+    assert seg_map["VIP"] == 2
+    assert seg_map["Новый"] == 1
+
+
+async def test_get_subscriber_ids_by_segment_all(fresh_db):
+    """Passing segment=None returns all subscribers."""
+    from db.repository import (
+        get_subscriber_ids_by_segment, set_subscriber_segment, upsert_subscriber,
+        get_or_create_client, save_bot_config,
+    )
+    client = await get_or_create_client(7003, None)
+    bot = await save_bot_config(client.id, "SegBot3", "coach", "7003:FAKE", "sys", {})
+    await upsert_subscriber(bot.id, 30001)
+    await upsert_subscriber(bot.id, 30002)
+    await set_subscriber_segment(bot.id, 30001, "VIP")
+    ids = await get_subscriber_ids_by_segment(bot.id, segment=None)
+    assert set(ids) == {30001, 30002}
+
+
+async def test_get_subscriber_ids_by_segment_filtered(fresh_db):
+    """Passing a segment returns only subscribers in that segment."""
+    from db.repository import (
+        get_subscriber_ids_by_segment, set_subscriber_segment, upsert_subscriber,
+        get_or_create_client, save_bot_config,
+    )
+    client = await get_or_create_client(7004, None)
+    bot = await save_bot_config(client.id, "SegBot4", "coach", "7004:FAKE", "sys", {})
+    await upsert_subscriber(bot.id, 40001)
+    await upsert_subscriber(bot.id, 40002)
+    await set_subscriber_segment(bot.id, 40001, "VIP")
+    vip_ids = await get_subscriber_ids_by_segment(bot.id, segment="VIP")
+    assert vip_ids == [40001]
+    new_ids = await get_subscriber_ids_by_segment(bot.id, segment="Новый")
+    assert new_ids == []
+
+
+async def test_set_subscriber_segment_returns_false_for_unknown(fresh_db):
+    """set_subscriber_segment returns False if subscriber doesn't exist."""
+    from db.repository import set_subscriber_segment, get_or_create_client, save_bot_config
+    client = await get_or_create_client(7005, None)
+    bot = await save_bot_config(client.id, "SegBot5", "coach", "7005:FAKE", "sys", {})
+    ok = await set_subscriber_segment(bot.id, 99999, "VIP")
+    assert ok is False
+
+
+async def test_upsert_subscriber_with_segment(fresh_db):
+    """upsert_subscriber sets segment on new subscriber."""
+    from db.repository import (
+        upsert_subscriber, get_segments_for_bot, get_or_create_client, save_bot_config,
+    )
+    client = await get_or_create_client(7006, None)
+    bot = await save_bot_config(client.id, "SegBot6", "coach", "7006:FAKE", "sys", {})
+    is_new = await upsert_subscriber(bot.id, 60001, segment="Premium")
+    assert is_new is True
+    segs = await get_segments_for_bot(bot.id)
+    assert segs[0]["segment"] == "Premium"
+    assert segs[0]["count"] == 1

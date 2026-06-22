@@ -13,7 +13,7 @@ from loguru import logger
 from db.repository import (
     get_bot_by_id_any,
     get_pending_broadcasts,
-    get_subscriber_ids,
+    get_subscriber_ids_by_segment,
     mark_broadcast_sent,
 )
 
@@ -41,7 +41,7 @@ async def run_pending_broadcasts(bot: Bot) -> None:
             await mark_broadcast_sent(broadcast.id, 0, 0)
             continue
 
-        subscriber_ids = await get_subscriber_ids(broadcast.bot_id)
+        subscriber_ids = await get_subscriber_ids_by_segment(broadcast.bot_id)
         if not subscriber_ids:
             logger.info("broadcasts: bot_id={} has no subscribers", broadcast.bot_id)
             await mark_broadcast_sent(broadcast.id, 0, 0)
