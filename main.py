@@ -35,11 +35,13 @@ from deployer import (
     clone_bot_files,
     deploy_bot,
     deploy_vk_bot,
+    deploy_max_bot,
     redeploy_bot,
     get_bot_logs,
     get_bot_status,
     prepare_bot_files,
     prepare_vk_bot_files,
+    prepare_max_bot_files,
     remove_bot,
     stop_bot,
     write_bot_greeting,
@@ -282,6 +284,7 @@ class IntakeStates(StatesGroup):
     ask_type = State()        # single-type (starter)
     ask_type_multi = State()  # multi-type toggle (pro/business)
     ask_vk_token = State()    # VK community token (collected before questionnaire)
+    ask_max_token = State()   # MAX messenger bot token (from @metabot)
     answering = State()
     clarifying = State()
     ask_bot_token = State()
@@ -418,6 +421,10 @@ def _bot_type_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(
         text="🔵 Создать VK-бота (ВКонтакте)",
         callback_data="vk:start",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="🟣 Создать бота для MAX (Mail.ru)",
+        callback_data="max:start",
     )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -846,7 +853,7 @@ async def on_vk_token(message: Message, state: FSMContext) -> None:
 
 
 def _bot_type_keyboard_vk() -> InlineKeyboardMarkup:
-    """Type selection for VK bots — same types but no VK entry point."""
+    """Type selection for VK bots — same types but no VK/MAX entry points."""
     rows = [
         [
             InlineKeyboardButton(
@@ -857,6 +864,66 @@ def _bot_type_keyboard_vk() -> InlineKeyboardMarkup:
         for key, spec in QUESTIONNAIRES.items()
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- MAX (Mail.ru Messenger) bot creation flow ---
+
+@router.callback_query(IntakeStates.ask_type, F.data == "max:start")
+async def cb_max_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(platform="max")
+    await state.set_state(IntakeStates.ask_max_token)
+    await callback.message.answer(
+        "Отлично! Для бота в MAX нужен токен.\n\n"
+        "Как получить токен:\n"
+        "1. Откройте MAX и напишите боту @metabot\n"
+        "2. Отправьте /newbot и следуйте инструкциям\n"
+        "3. Скопируйте полученный токен и отправьте его сюда:"
+    )
+    await callback.answer()
+
+
+async def _validate_max_token(token: str) -> bool:
+    """Call MAX Bot API /self/get to verify the token."""
+    import aiohttp as _aiohttp
+    url = "https://api.icq.net/bot/v1/self/get"
+    try:
+        async with _aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                params={"token": token},
+                timeout=_aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+                return data.get("ok") is True
+    except Exception:
+        return False
+
+
+@router.message(IntakeStates.ask_max_token)
+async def on_max_token(message: Message, state: FSMContext) -> None:
+    token = (message.text or "").strip()
+    if not token:
+        await message.answer("Пожалуйста, отправьте токен MAX-бота.")
+        return
+
+    await message.answer("Проверяю токен...")
+    valid = await _validate_max_token(token)
+    if not valid:
+        await message.answer(
+            "Токен недействителен.\n"
+            "Убедитесь, что скопировали его полностью, и отправьте ещё раз."
+        )
+        return
+
+    await state.update_data(max_token=token)
+    await state.set_state(IntakeStates.ask_type)
+    await message.answer(
+        "Токен MAX-бота принят!\n\n"
+        "Теперь выберите тип бота:",
+        reply_markup=_bot_type_keyboard_vk(),
+    )
 
 
 def _redact_sensitive(raw_answers: dict) -> tuple[dict, int]:
@@ -1028,11 +1095,15 @@ async def on_clarifying(message: Message, state: FSMContext) -> None:
 
 
 async def _goto_token_or_process(message: Message, state: FSMContext) -> None:
-    """After questionnaire: ask Telegram token or run VK pipeline directly."""
+    """After questionnaire: route to platform-specific token/deploy flow."""
     data = await state.get_data()
     if data.get("platform") == "vk":
         await state.set_state(IntakeStates.processing)
         await _run_pipeline_and_save(message, state, data["vk_token"], platform="vk")
+        return
+    if data.get("platform") == "max":
+        await state.set_state(IntakeStates.processing)
+        await _run_pipeline_and_save(message, state, data["max_token"], platform="max")
         return
 
     user = message.from_user
@@ -1180,6 +1251,8 @@ async def _run_pipeline_core(
         )
         if platform == "vk":
             prepare_vk_bot_files(saved_bot.id, spec.system_prompt)
+        elif platform == "max":
+            prepare_max_bot_files(saved_bot.id, spec.system_prompt)
         else:
             # Files live under bots/{bot_id}/ so multiple bots per client don't
             # collide; deployer uses the same path.
@@ -1209,6 +1282,8 @@ async def _run_pipeline_core(
     try:
         if platform == "vk":
             await deploy_vk_bot(saved_bot.id)
+        elif platform == "max":
+            await deploy_max_bot(saved_bot.id)
         else:
             await deploy_bot(saved_bot.id)
         deploy_ok = True
@@ -1232,7 +1307,7 @@ async def _run_pipeline_core(
             ],
         ]
     )
-    platform_label = "VK" if platform == "vk" else "Telegram"
+    platform_label = "VK" if platform == "vk" else ("MAX" if platform == "max" else "Telegram")
     sub = await get_active_subscription(client.id)
     cur_tier = sub.tier if (sub and sub.status == "active") else "starter"
     if deploy_ok:
@@ -2478,7 +2553,8 @@ def _bot_status_badge(bot) -> str:
 
 
 def _platform_icon(bot) -> str:
-    return "🔵" if getattr(bot, "platform", "telegram") == "vk" else "⚙️"
+    p = getattr(bot, "platform", "telegram")
+    return "🔵" if p == "vk" else ("🟣" if p == "max" else "⚙️")
 
 
 def _mybots_keyboard(bots: list) -> InlineKeyboardMarkup:
@@ -2506,7 +2582,7 @@ async def _render_mybots_list(client_id: int) -> tuple[str, InlineKeyboardMarkup
         if stats is not None:
             req_count = stats["request_count"]
         platform = getattr(b, "platform", "telegram")
-        platform_tag = " 🔵 VK" if platform == "vk" else ""
+        platform_tag = " 🔵 VK" if platform == "vk" else (" 🟣 MAX" if platform == "max" else "")
         lines.append(
             f"{i}. {b.bot_name} ({_bot_type_ru(b.bot_type)}){platform_tag}\n"
             f"   Статус: {_bot_status_badge(b)}\n"
@@ -2720,7 +2796,7 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
                         text="📚 База знаний",
                         callback_data=f"bot:library_info:{bot.id}",
                     )]
-                    if bot.platform != "vk"
+                    if bot.platform not in ("vk", "max")
                     else []
                 ),
             ],
@@ -4128,13 +4204,15 @@ async def cb_bot_resume(callback: CallbackQuery) -> None:
     if not ok:
         await callback.answer("Бот не найден", show_alert=True)
         return
-    # deploy_bot/deploy_vk_bot are idempotent — fast-start an existing stopped
-    # container or rebuild from scratch if it was removed.
+    # deploy_bot/deploy_vk_bot/deploy_max_bot are idempotent — fast-start an
+    # existing stopped container or rebuild from scratch if removed.
     bot_cfg = await get_bot_by_id(bot_id, client.id)
     _platform = getattr(bot_cfg, "platform", "telegram") if bot_cfg else "telegram"
     try:
         if _platform == "vk":
             await deploy_vk_bot(bot_id)
+        elif _platform == "max":
+            await deploy_max_bot(bot_id)
         else:
             await deploy_bot(bot_id)
     except Exception:
@@ -4171,7 +4249,7 @@ def _edit_menu_keyboard(bot_id: int, platform: str = "telegram") -> InlineKeyboa
         [InlineKeyboardButton(text="⚡ Триггеры", callback_data=f"bot:triggers:{bot_id}")],
         [InlineKeyboardButton(text="🛡 Лимит сообщений", callback_data=f"bot:rate_limit:{bot_id}")],
     ]
-    if platform != "vk":
+    if platform not in ("vk", "max"):
         rows.append([InlineKeyboardButton(
             text="📋 Кнопки быстрых ответов",
             callback_data=f"bot:quick_replies:{bot_id}",
