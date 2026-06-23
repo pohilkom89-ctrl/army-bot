@@ -1502,13 +1502,19 @@ async def _render_usage_main(
     return text, _usage_main_keyboard()
 
 
-_TIER_EMOJI = {"cheap": "💚", "balanced": "💛", "smart": "❤️", "yandex_lite": "🇷🇺", "yandex_pro": "🇷🇺"}
+_TIER_EMOJI = {
+    "cheap": "💚", "balanced": "💛", "smart": "❤️",
+    "yandex_lite": "🇷🇺", "yandex_pro": "🇷🇺",
+    "gigachat": "🟢", "gigachat_max": "🟢",
+}
 _TIER_RU = {
     "cheap": "Дешёвая",
     "balanced": "Сбалансированная",
     "smart": "Умная",
     "yandex_lite": "YandexGPT Lite",
     "yandex_pro": "YandexGPT Pro",
+    "gigachat": "GigaChat",
+    "gigachat_max": "GigaChat Max",
 }
 
 
@@ -1641,6 +1647,8 @@ _STRATEGY_META: dict[str, tuple[str, str]] = {
     "cheap": ("💰 Всегда дешёвая", "Всегда дешёвая"),
     "yandex_lite": ("🇷🇺 YandexGPT Lite", "YandexGPT Lite"),
     "yandex_pro": ("🇷🇺 YandexGPT Pro", "YandexGPT Pro"),
+    "gigachat": ("🟢 GigaChat (Сбер)", "GigaChat"),
+    "gigachat_max": ("🟢 GigaChat Max (Сбер)", "GigaChat Max"),
 }
 
 
@@ -1676,7 +1684,8 @@ def _settings_text(bot_cfg, current: str) -> str:
         "• 🚀 Автоматически — роутер выбирает дешёвую/среднюю/умную под каждый запрос\n"
         "• 💎 Всегда умная — качество важнее стоимости\n"
         "• 💰 Всегда дешёвая — максимальная экономия токенов\n"
-        "• 🇷🇺 YandexGPT — российская нейросеть, данные не покидают РФ\n\n"
+        "• 🇷🇺 YandexGPT — российская нейросеть, данные не покидают РФ\n"
+        "• 🟢 GigaChat — нейросеть Сбера, данные в РФ, качественнее YandexGPT\n\n"
         f"Текущая: {current_label}"
     )
 
@@ -5586,7 +5595,7 @@ async def _handle_chat_text(
             tier = "smart"
         elif strategy == "cheap":
             tier = "cheap"
-        elif strategy in ("yandex_lite", "yandex_pro"):
+        elif strategy in ("yandex_lite", "yandex_pro", "gigachat", "gigachat_max"):
             tier = strategy
         else:
             # Lazy import — avoids loading agents.router at module level and

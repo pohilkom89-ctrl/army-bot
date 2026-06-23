@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -63,6 +64,12 @@ _yandex_client: OpenAI | None = None
 
 _YANDEX_BASE_URL = "https://llm.api.cloud.yandex.net/v1"
 
+# GigaChat — OAuth2 token cache (refreshed every 30 min).
+_GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v1/oauth"
+_GIGACHAT_BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
+_gigachat_token: str | None = None
+_gigachat_token_exp: float = 0.0
+
 
 def _get_client() -> OpenAI:
     global _client
@@ -72,6 +79,41 @@ def _get_client() -> OpenAI:
             raise RuntimeError("OPENROUTER_API_KEY env var is required")
         _client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
     return _client
+
+
+def _get_gigachat_client() -> OpenAI:
+    """Return an OpenAI-compatible client pointed at GigaChat with a fresh OAuth token."""
+    global _gigachat_token, _gigachat_token_exp
+    import httpx
+    import requests as _req
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if not _gigachat_token or time.time() >= _gigachat_token_exp - 60:
+        creds = settings.gigachat_credentials
+        if not creds:
+            raise RuntimeError("GIGACHAT_CREDENTIALS env var is required")
+        resp = _req.post(
+            _GIGACHAT_OAUTH_URL,
+            headers={
+                "Authorization": f"Basic {creds}",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "RqUID": str(uuid.uuid4()),
+            },
+            data={"scope": "GIGACHAT_API_PERS"},
+            verify=False,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _gigachat_token = data["access_token"]
+        _gigachat_token_exp = data["expires_at"] / 1000  # ms → s
+
+    return OpenAI(
+        api_key=_gigachat_token,
+        base_url=_GIGACHAT_BASE_URL,
+        http_client=httpx.Client(verify=False),
+    )
 
 
 def _get_yandex_client() -> OpenAI:
@@ -100,10 +142,13 @@ class BotSpec:
 
 
 def _chat(model: str, system: str, user_message: str) -> str:
-    # "yandex:<slug>" → Yandex AI Studio client; everything else → OpenRouter.
+    # Route by model prefix to the correct backend client.
     if model.startswith("yandex:"):
         client = _get_yandex_client()
         real_model = model[len("yandex:"):]
+    elif model.startswith("gigachat:"):
+        client = _get_gigachat_client()
+        real_model = model[len("gigachat:"):]
     else:
         client = _get_client()
         real_model = model

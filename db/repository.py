@@ -31,6 +31,9 @@ MODEL_PRICING_USD_PER_1M: dict[str, float] = {
     # Update when USD/RUB rate or Yandex pricing changes.
     "yandexgpt-lite": 0.40,
     "yandexgpt-pro": 1.20,
+    # GigaChat / Sber — approximate USD prices, billed by Sber in RUB.
+    "GigaChat": 0.50,
+    "GigaChat-Max": 1.50,
 }
 
 TOKEN_RESET_PERIOD = timedelta(days=30)

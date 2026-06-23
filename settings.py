@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     yandex_api_key: str | None = None
     yandex_folder_id: str | None = None
 
+    # GigaChat / Sber (optional — enables gigachat / gigachat_max strategies)
+    # Value: base64(clientId:clientSecret) from console.sber.ru → GigaChat API
+    gigachat_credentials: str | None = None
+
     # Image generation (FusionBrain)
     fusionbrain_api_key: str | None = None
     fusionbrain_secret_key: str | None = None

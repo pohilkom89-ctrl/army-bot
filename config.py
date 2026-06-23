@@ -97,13 +97,18 @@ MODELS: dict[str, str] = {
     # "yandex:" prefix signals pipeline._chat to use the Yandex client.
     "yandex_lite": "yandex:yandexgpt-lite",        # ~$0.40/1M (RU data center)
     "yandex_pro": "yandex:yandexgpt-pro",          # ~$1.20/1M (RU data center)
+    # "gigachat:" prefix signals pipeline._chat to use the GigaChat OAuth client.
+    "gigachat": "gigachat:GigaChat",               # ~$0.50/1M (RU data center)
+    "gigachat_max": "gigachat:GigaChat-Max",       # ~$1.50/1M (RU data center)
 }
 
 _yandex_enabled = bool(settings.yandex_api_key and settings.yandex_folder_id)
+_gigachat_enabled = bool(settings.gigachat_credentials)
 
 MODEL_STRATEGIES: tuple[str, ...] = (
     "auto", "smart", "cheap",
     *( ("yandex_lite", "yandex_pro") if _yandex_enabled else () ),
+    *( ("gigachat", "gigachat_max") if _gigachat_enabled else () ),
 )
 
 
