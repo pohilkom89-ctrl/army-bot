@@ -53,6 +53,7 @@ RUN pip install --no-cache-dir \\
 COPY main.py /app/main.py
 COPY vk_main.py /app/vk_main.py
 COPY max_main.py /app/max_main.py
+COPY lms_main.py /app/lms_main.py
 COPY usage_reporter.py /app/usage_reporter.py
 COPY system_prompt.txt /app/system_prompt.txt
 COPY greeting.txt /app/greeting.txt
@@ -134,7 +135,7 @@ def _write_dockerfile(bot_id: int) -> Path:
 def _ensure_runtime_files(bot_dir: Path) -> None:
     """Copy shared runtime helpers into the bot's Docker context. Always
     overwrites so updates to the helper propagate on the next rebuild."""
-    for name in ("usage_reporter.py", "vk_main.py", "max_main.py"):
+    for name in ("usage_reporter.py", "vk_main.py", "max_main.py", "lms_main.py"):
         src = RUNTIME_DIR / name
         if not src.exists():
             raise FileNotFoundError(
@@ -744,4 +745,120 @@ def _deploy_max_sync(
     )
     container_id = getattr(container, "id", str(container))
     logger.info("deployer: MAX container {} started (id={})", name, container_id)
+    return container_id
+
+
+_EMPTY_COURSE = '{"title":"","welcome":"","completion_message":"","modules":[]}'
+
+
+def write_bot_course(bot_id: int, course: dict) -> None:
+    """Write course.json for an LMS bot. Hot-reloaded by lms_main.py."""
+    import json as _json
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "course.json").write_text(
+        _json.dumps(course, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def prepare_lms_bot_files(bot_id: int, system_prompt: str) -> Path:
+    """Prepare build context for an LMS bot. Uses lms_main.py as entrypoint."""
+    bot_dir = _bot_dir(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    _write_system_prompt(bot_dir, system_prompt)
+    for fname, default in [
+        ("greeting.txt", ""),
+        ("blacklist.txt", ""),
+        ("webhook_url.txt", ""),
+        ("crm_type.txt", "generic"),
+        ("triggers.json", "{}"),
+        ("rate_limit.txt", "0"),
+        ("quick_replies.json", "[]"),
+        ("payment_products.json", "[]"),
+        ("sheets_webhook.txt", ""),
+        ("course.json", _EMPTY_COURSE),
+        ("progress.json", "{}"),
+    ]:
+        if not (bot_dir / fname).exists():
+            (bot_dir / fname).write_text(default, encoding="utf-8")
+    if not (bot_dir / "main.py").exists():
+        (bot_dir / "main.py").write_text("# lms bot placeholder\n", encoding="utf-8")
+    _write_dockerfile(bot_id)
+    _ensure_runtime_files(bot_dir)
+    logger.info("deployer: prepared LMS files for bot_id={}", bot_id)
+    return bot_dir
+
+
+async def deploy_lms_bot(bot_id: int) -> str:
+    """Deploy an LMS bot. Uses lms_main.py entrypoint."""
+    bot = await get_bot_by_id_any(bot_id)
+    if bot is None:
+        raise RuntimeError(f"deployer: no BotConfig for bot_id={bot_id}")
+    bot_token = bot.bot_token
+    if not bot_token:
+        raise RuntimeError(f"deployer: bot_token empty for lms bot_id={bot_id}")
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    if not openrouter_key:
+        raise RuntimeError("OPENROUTER_API_KEY is required to deploy bots")
+    model_bots = os.getenv("OPENROUTER_MODEL_BOTS", "qwen/qwen3-235b-a22b")
+    internal_api_key = os.getenv("INTERNAL_API_KEY")
+    if not internal_api_key:
+        raise RuntimeError("INTERNAL_API_KEY is required to deploy bots")
+    factory_url = os.getenv("FACTORY_URL", "http://host.docker.internal:8080")
+    system_prompt = bot.system_prompt or ""
+
+    return await asyncio.to_thread(
+        _deploy_lms_sync,
+        bot_id, bot_token, openrouter_key, model_bots, factory_url,
+        internal_api_key, system_prompt,
+    )
+
+
+def _deploy_lms_sync(
+    bot_id: int,
+    bot_token: str,
+    openrouter_key: str,
+    model_bots: str,
+    factory_url: str,
+    internal_api_key: str,
+    system_prompt: str,
+) -> str:
+    bot_dir = _bot_dir(bot_id)
+    name = _container_name(bot_id)
+
+    if docker.container.exists(name):
+        state = _container_state(name)
+        if state == "running":
+            logger.info("deployer: LMS {} already running — noop", name)
+            return _container_id(name)
+        if state in ("exited", "created"):
+            docker.container.start(name)
+            return _container_id(name)
+        docker.container.remove(name, force=True)
+
+    _write_system_prompt(bot_dir, system_prompt)
+    build_bot_image(bot_dir, bot_id)
+    tag = _image_tag(bot_id)
+    logger.info("deployer: starting LMS container {}", name)
+    container = docker.run(
+        image=tag,
+        name=name,
+        detach=True,
+        restart="unless-stopped",
+        cpus=CONTAINER_CPU_LIMIT,
+        memory=CONTAINER_MEMORY_LIMIT,
+        add_hosts=[("host.docker.internal", "host-gateway")],
+        command=["python", "lms_main.py"],
+        envs={
+            "BOT_TOKEN": bot_token,
+            "BOT_ID": str(bot_id),
+            "OPENROUTER_API_KEY": openrouter_key,
+            "OPENROUTER_MODEL_BOTS": model_bots,
+            "FACTORY_URL": factory_url,
+            "INTERNAL_API_KEY": internal_api_key,
+        },
+    )
+    container_id = getattr(container, "id", str(container))
+    logger.info("deployer: LMS container {} started (id={})", name, container_id)
     return container_id

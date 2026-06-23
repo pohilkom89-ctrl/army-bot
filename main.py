@@ -36,12 +36,15 @@ from deployer import (
     deploy_bot,
     deploy_vk_bot,
     deploy_max_bot,
+    deploy_lms_bot,
     redeploy_bot,
     get_bot_logs,
     get_bot_status,
     prepare_bot_files,
     prepare_vk_bot_files,
     prepare_max_bot_files,
+    prepare_lms_bot_files,
+    write_bot_course,
     remove_bot,
     stop_bot,
     write_bot_greeting,
@@ -343,6 +346,16 @@ class PaymentProductStates(StatesGroup):
 
 class SheetsStates(StatesGroup):
     waiting_url = State()
+
+
+class LmsCourseStates(StatesGroup):
+    idle = State()
+    adding_module = State()
+    adding_lesson_title = State()
+    adding_lesson_content = State()
+    adding_quiz_question = State()
+    adding_quiz_options = State()
+    adding_quiz_correct = State()
 
 
 class BlacklistStates(StatesGroup):
@@ -1253,6 +1266,8 @@ async def _run_pipeline_core(
             prepare_vk_bot_files(saved_bot.id, spec.system_prompt)
         elif platform == "max":
             prepare_max_bot_files(saved_bot.id, spec.system_prompt)
+        elif saved_bot.bot_type == "lms":
+            prepare_lms_bot_files(saved_bot.id, spec.system_prompt)
         else:
             # Files live under bots/{bot_id}/ so multiple bots per client don't
             # collide; deployer uses the same path.
@@ -1284,6 +1299,8 @@ async def _run_pipeline_core(
             await deploy_vk_bot(saved_bot.id)
         elif platform == "max":
             await deploy_max_bot(saved_bot.id)
+        elif saved_bot.bot_type == "lms":
+            await deploy_lms_bot(saved_bot.id)
         else:
             await deploy_bot(saved_bot.id)
         deploy_ok = True
@@ -2820,6 +2837,14 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
                     callback_data=f"bot:sheets:{bot.id}",
                 ),
             ],
+            *(
+                [[InlineKeyboardButton(
+                    text="📚 Редактировать курс",
+                    callback_data=f"bot:lms_course:{bot.id}",
+                )]]
+                if getattr(bot, "bot_type", "") == "lms"
+                else []
+            ),
             [
                 InlineKeyboardButton(
                     text="🔁 Клонировать",
@@ -3943,6 +3968,265 @@ async def on_sheets_url(message: Message, state: FSMContext) -> None:
         await message.answer("✅ URL сохранён.\n⚠️ Перезапуск не удался — попробуйте через /mybots.")
 
 
+# ---------------------------------------------------------------------------
+# LMS course editor
+# ---------------------------------------------------------------------------
+
+def _course_overview_text(course: dict) -> str:
+    modules = course.get("modules", [])
+    total_lessons = sum(len(m.get("lessons", [])) for m in modules)
+    lines = [
+        f"📚 Курс: «{course.get('title', '—')}»",
+        f"Модулей: {len(modules)}  |  Уроков: {total_lessons}\n",
+    ]
+    for i, m in enumerate(modules, 1):
+        lessons = m.get("lessons", [])
+        lines.append(f"{'─'*28}")
+        lines.append(f"📂 {i}. {m['title']} ({len(lessons)} ур.)")
+        for j, l in enumerate(lessons, 1):
+            quiz_mark = " ❓" if l.get("quiz") else ""
+            lines.append(f"   {j}. {l['title']}{quiz_mark}")
+    return "\n".join(lines)
+
+
+def _course_editor_kb(bot_id: int, course: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for i, m in enumerate(course.get("modules", [])):
+        rows.append([InlineKeyboardButton(
+            text=f"📂 {m['title']} — добавить урок",
+            callback_data=f"lms:add_lesson:{bot_id}:{i}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="➕ Добавить модуль", callback_data=f"lms:add_module:{bot_id}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="◀️ Назад", callback_data=f"bot:detail:{bot_id}",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("bot:lms_course:"))
+async def cb_bot_lms_course(callback: CallbackQuery, state: FSMContext) -> None:
+    bot_id = int(callback.data.split(":")[-1])
+    client = await get_or_create_client(callback.from_user.id)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    course = (bot_cfg.config_json or {}).get("course", {
+        "title": bot_cfg.bot_name,
+        "welcome": "Добро пожаловать!",
+        "completion_message": "🎓 Поздравляем с завершением курса!",
+        "modules": [],
+    })
+    await state.update_data(lms_bot_id=bot_id, lms_course=course)
+    await state.set_state(LmsCourseStates.idle)
+    if callback.message is not None:
+        await callback.message.answer(
+            _course_overview_text(course),
+            reply_markup=_course_editor_kb(bot_id, course),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("lms:add_module:"), LmsCourseStates.idle)
+async def cb_lms_add_module(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(LmsCourseStates.adding_module)
+    if callback.message is not None:
+        await callback.message.answer(
+            "📂 Введите название нового модуля:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="lms:cancel_edit"),
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.message(LmsCourseStates.adding_module)
+async def on_lms_module_name(message: Message, state: FSMContext) -> None:
+    title = (message.text or "").strip()
+    if not title:
+        await message.answer("Введите название модуля.")
+        return
+    data = await state.get_data()
+    course = data["lms_course"]
+    bot_id = data["lms_bot_id"]
+    mid = f"m{len(course['modules']) + 1}"
+    course["modules"].append({"id": mid, "title": title, "lessons": []})
+    await _save_lms_course(bot_id, course, state)
+    await state.set_state(LmsCourseStates.idle)
+    await message.answer(
+        f"✅ Модуль «{title}» добавлен.\n\n" + _course_overview_text(course),
+        reply_markup=_course_editor_kb(bot_id, course),
+    )
+
+
+@router.callback_query(F.data.startswith("lms:add_lesson:"), LmsCourseStates.idle)
+async def cb_lms_add_lesson(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    bot_id = int(parts[2])
+    module_idx = int(parts[3])
+    await state.update_data(lms_module_idx=module_idx)
+    await state.set_state(LmsCourseStates.adding_lesson_title)
+    if callback.message is not None:
+        await callback.message.answer(
+            "📝 Введите название урока:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="lms:cancel_edit"),
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.message(LmsCourseStates.adding_lesson_title)
+async def on_lms_lesson_title(message: Message, state: FSMContext) -> None:
+    title = (message.text or "").strip()
+    if not title:
+        await message.answer("Введите название урока.")
+        return
+    await state.update_data(lms_lesson_title=title)
+    await state.set_state(LmsCourseStates.adding_lesson_content)
+    await message.answer(
+        f"📖 Урок «{title}»\n\nТеперь введите текст урока (можно несколько абзацев):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="lms:cancel_edit"),
+        ]]),
+    )
+
+
+@router.message(LmsCourseStates.adding_lesson_content)
+async def on_lms_lesson_content(message: Message, state: FSMContext) -> None:
+    content = (message.text or "").strip()
+    if not content:
+        await message.answer("Введите текст урока.")
+        return
+    await state.update_data(lms_lesson_content=content)
+    await state.set_state(LmsCourseStates.adding_quiz_question)
+    await message.answer(
+        "❓ Добавить вопрос-квиз к этому уроку?\n\n"
+        "Введите вопрос или нажмите «Пропустить»:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Пропустить (без квиза)", callback_data="lms:skip_quiz")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="lms:cancel_edit")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "lms:skip_quiz", LmsCourseStates.adding_quiz_question)
+async def cb_lms_skip_quiz(callback: CallbackQuery, state: FSMContext) -> None:
+    await _finish_lesson(callback.from_user.id, state, quiz=None)
+    if callback.message is not None:
+        data = await state.get_data()
+        await callback.message.answer(
+            "✅ Урок добавлен.\n\n" + _course_overview_text(data["lms_course"]),
+            reply_markup=_course_editor_kb(data["lms_bot_id"], data["lms_course"]),
+        )
+    await callback.answer()
+
+
+@router.message(LmsCourseStates.adding_quiz_question)
+async def on_lms_quiz_question(message: Message, state: FSMContext) -> None:
+    q = (message.text or "").strip()
+    if not q:
+        return
+    await state.update_data(lms_quiz_question=q)
+    await state.set_state(LmsCourseStates.adding_quiz_options)
+    await message.answer(
+        "Введите варианты ответов — каждый с новой строки:\n\n"
+        "Пример:\n"
+        "Верный ответ\n"
+        "Неверный ответ A\n"
+        "Неверный ответ B"
+    )
+
+
+@router.message(LmsCourseStates.adding_quiz_options)
+async def on_lms_quiz_options(message: Message, state: FSMContext) -> None:
+    lines = [l.strip() for l in (message.text or "").splitlines() if l.strip()]
+    if len(lines) < 2:
+        await message.answer("Нужно минимум 2 варианта ответа. Попробуйте ещё раз.")
+        return
+    await state.update_data(lms_quiz_options=lines)
+    await state.set_state(LmsCourseStates.adding_quiz_correct)
+    numbered = "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(lines))
+    await message.answer(
+        f"Какой вариант верный?\n\n{numbered}\n\nОтправьте номер (1, 2, 3…):"
+    )
+
+
+@router.message(LmsCourseStates.adding_quiz_correct)
+async def on_lms_quiz_correct(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    options = data.get("lms_quiz_options", [])
+    try:
+        idx = int(text) - 1
+        if idx < 0 or idx >= len(options):
+            raise ValueError
+    except ValueError:
+        await message.answer(f"Введите число от 1 до {len(options)}.")
+        return
+    quiz = {
+        "question": data["lms_quiz_question"],
+        "options": options,
+        "correct": idx,
+        "explanation": "",
+    }
+    await _finish_lesson(message.from_user.id, state, quiz=quiz)
+    data = await state.get_data()
+    await message.answer(
+        "✅ Урок с квизом добавлен.\n\n" + _course_overview_text(data["lms_course"]),
+        reply_markup=_course_editor_kb(data["lms_bot_id"], data["lms_course"]),
+    )
+
+
+async def _finish_lesson(user_id: int, state: FSMContext, quiz) -> None:
+    data = await state.get_data()
+    course = data["lms_course"]
+    bot_id = data["lms_bot_id"]
+    module_idx = data.get("lms_module_idx", 0)
+    title = data.get("lms_lesson_title", "Урок")
+    content = data.get("lms_lesson_content", "")
+    mod = course["modules"][module_idx]
+    lid = f"{mod['id']}_l{len(mod['lessons']) + 1}"
+    mod["lessons"].append({"id": lid, "title": title, "content": content, "quiz": quiz})
+    await _save_lms_course(bot_id, course, state)
+    await state.set_state(LmsCourseStates.idle)
+
+
+async def _save_lms_course(bot_id: int, course: dict, state: FSMContext) -> None:
+    """Persist course to DB config_json + write course.json (hot-reload in container)."""
+    from db.database import get_session
+    from sqlalchemy import select, update as sql_update
+    from db.models import BotConfig
+    async with get_session() as session:
+        result = await session.execute(select(BotConfig).where(BotConfig.id == bot_id))
+        bot_cfg = result.scalar_one_or_none()
+        if bot_cfg:
+            cfg = dict(bot_cfg.config_json or {})
+            cfg["course"] = course
+            await session.execute(
+                sql_update(BotConfig).where(BotConfig.id == bot_id).values(config_json=cfg)
+            )
+            await session.commit()
+    write_bot_course(bot_id, course)
+    await state.update_data(lms_course=course)
+
+
+@router.callback_query(F.data == "lms:cancel_edit")
+async def cb_lms_cancel_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.set_state(LmsCourseStates.idle)
+    bot_id = data.get("lms_bot_id")
+    course = data.get("lms_course", {})
+    if callback.message is not None:
+        await callback.message.answer(
+            "Отменено.\n\n" + _course_overview_text(course),
+            reply_markup=_course_editor_kb(bot_id, course) if bot_id else None,
+        )
+    await callback.answer()
+
+
 def _schedule_list_keyboard(bot_id: int, broadcasts: list) -> InlineKeyboardMarkup:
     rows = []
     for b in broadcasts:
@@ -4213,6 +4497,8 @@ async def cb_bot_resume(callback: CallbackQuery) -> None:
             await deploy_vk_bot(bot_id)
         elif _platform == "max":
             await deploy_max_bot(bot_id)
+        elif getattr(bot_cfg, "bot_type", "") == "lms":
+            await deploy_lms_bot(bot_id)
         else:
             await deploy_bot(bot_id)
     except Exception:
