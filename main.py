@@ -112,6 +112,9 @@ from db.repository import (
     get_quick_replies,
     set_quick_replies,
     get_engagement_funnel,
+    set_agency_flag,
+    find_client_by_telegram_id,
+    get_agency_sub_clients,
 )
 from managed_bots import (
     delete_managed_bot as _delete_managed_bot,
@@ -6272,6 +6275,66 @@ async def cmd_admin_stats(message: Message) -> None:
         text += "\n🏆 Топ по токенам:\n" + "\n".join(top_lines)
 
     await message.answer(text)
+
+
+@router.message(Command("make_agency"))
+async def cmd_make_agency(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /make_agency <telegram_id>\nОтозвать: /make_agency <telegram_id> off")
+        return
+    try:
+        tg_id = int(parts[1])
+    except ValueError:
+        await message.answer("Неверный telegram_id — нужно число.")
+        return
+    value = parts[2].lower() != "off" if len(parts) > 2 else True
+    target = await find_client_by_telegram_id(tg_id)
+    if target is None:
+        await message.answer(f"Клиент с telegram_id={tg_id} не найден.")
+        return
+    await set_agency_flag(target.id, value)
+    status = "получил статус агентства ✅" if value else "лишён статуса агентства"
+    await message.answer(f"Клиент {tg_id} {status}.")
+
+
+@router.message(Command("my_clients"))
+async def cmd_my_clients(message: Message) -> None:
+    if not message.from_user:
+        return
+    client = await get_or_create_client(message.from_user.id)
+    if not client.is_agency:
+        await message.answer(
+            "Эта команда доступна только партнёрам-агентствам.\n"
+            "Свяжитесь с поддержкой для получения статуса агентства."
+        )
+        return
+
+    sub_clients = await get_agency_sub_clients(client.id)
+    ref_code = await get_or_create_referral_code(client.id)
+    ref_link = f"t.me/{_BOT_USERNAME}?start=ref_{ref_code}"
+
+    if not sub_clients:
+        await message.answer(
+            f"👥 Ваши клиенты\n\n"
+            f"Пока никто не зарегистрировался по вашей ссылке.\n\n"
+            f"Партнёрская ссылка:\n{ref_link}"
+        )
+        return
+
+    lines = [f"👥 Ваши клиенты — {len(sub_clients)} чел.\n"]
+    for sc in sub_clients[:30]:
+        name = f"@{sc['username']}" if sc['username'] else f"id{sc['telegram_id']}"
+        date = sc['created_at'].strftime("%d.%m.%Y") if sc['created_at'] else "—"
+        bot_word = "бот" if sc['bot_count'] == 1 else ("бота" if 2 <= sc['bot_count'] <= 4 else "ботов")
+        lines.append(f"• {name} — {sc['bot_count']} {bot_word}, с {date}")
+    if len(sub_clients) > 30:
+        lines.append(f"… и ещё {len(sub_clients) - 30}")
+
+    lines.append(f"\nПартнёрская ссылка:\n{ref_link}")
+    await message.answer("\n".join(lines))
 
 
 class LibraryStates(StatesGroup):

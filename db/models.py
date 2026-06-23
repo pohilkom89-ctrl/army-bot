@@ -43,6 +43,9 @@ class Client(Base):
     # Daily token-limit alerts. Default ON; flipped via /limit_alerts.
     limit_alerts_enabled = Column(Boolean, nullable=False, default=True)
 
+    # Agency / reseller flag — set by admin via /make_agency
+    is_agency = Column(Boolean, nullable=False, default=False)
+
     # Referral program
     referral_code = Column(String(16), unique=True, nullable=True, index=True)
     referred_by_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)

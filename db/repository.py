@@ -1036,6 +1036,56 @@ async def get_referral_stats(client_id: int) -> dict:
         }
 
 
+async def set_agency_flag(client_id: int, value: bool) -> None:
+    async with get_session() as session:
+        await session.execute(
+            update(Client).where(Client.id == client_id).values(is_agency=value)
+        )
+        await session.commit()
+
+
+async def find_client_by_telegram_id(telegram_id: int) -> Client | None:
+    async with get_session() as session:
+        result = await session.execute(
+            select(Client).where(Client.telegram_id == telegram_id)
+        )
+        client = result.scalar_one_or_none()
+        if client is not None:
+            session.expunge(client)
+        return client
+
+
+async def get_agency_sub_clients(agency_client_id: int) -> list[dict]:
+    """Return sub-clients referred by this agency client, with bot counts."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(
+                Client.id,
+                Client.telegram_id,
+                Client.username,
+                Client.created_at,
+                func.count(BotConfig.id).label("bot_count"),
+            )
+            .outerjoin(
+                BotConfig,
+                (BotConfig.client_id == Client.id) & (BotConfig.is_active == True),
+            )
+            .where(Client.referred_by_id == agency_client_id)
+            .group_by(Client.id)
+            .order_by(Client.created_at.desc())
+        )
+        return [
+            {
+                "client_id": r.id,
+                "telegram_id": r.telegram_id,
+                "username": r.username,
+                "bot_count": r.bot_count,
+                "created_at": r.created_at,
+            }
+            for r in result.all()
+        ]
+
+
 async def apply_pending_referral_reward(referee_client_id: int) -> int | None:
     """Called after a payment completes. If this client was referred and the
     reward hasn't been sent yet, extend the referrer's subscription by
