@@ -1,13 +1,13 @@
 """add segment to scheduled_broadcasts
 
-Revision ID: 0015_add_scheduled_broadcast_segment
+Revision ID: 0015_sched_broadcast_seg
 Revises: 0014_add_subscriber_segments
 Create Date: 2026-06-23
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0015_add_scheduled_broadcast_segment"
+revision = "0015_sched_broadcast_seg"
 down_revision = "0014_add_subscriber_segments"
 branch_labels = None
 depends_on = None
