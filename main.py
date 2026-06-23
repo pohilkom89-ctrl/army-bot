@@ -2,6 +2,7 @@ import asyncio
 import csv
 import html
 import os
+import random
 import re
 import signal
 from datetime import datetime, timedelta, timezone
@@ -320,6 +321,7 @@ class BroadcastStates(StatesGroup):
     waiting_content = State()
     waiting_url = State()
     confirming = State()
+    waiting_variant_b = State()
     sending = State()
 
 
@@ -3156,14 +3158,16 @@ async def cb_broadcast_choose_segment(callback: CallbackQuery, state: FSMContext
     await callback.answer()
 
 
-def _broadcast_confirm_kb(sub_count: int, has_btn: bool) -> InlineKeyboardMarkup:
+def _broadcast_confirm_kb(sub_count: int, has_btn: bool, has_ab: bool = False) -> InlineKeyboardMarkup:
     add_btn_label = "✏️ Изменить кнопку-ссылку" if has_btn else "🔗 Добавить кнопку-ссылку"
+    ab_label = "✏️ Изменить вариант B" if has_ab else "🧪 A/B тест (добавить вариант B)"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=f"✅ Отправить {_format_num(sub_count)} подписчикам",
             callback_data="broadcast:do_send",
         )],
         [InlineKeyboardButton(text=add_btn_label, callback_data="broadcast:add_btn")],
+        [InlineKeyboardButton(text=ab_label, callback_data="broadcast:ab_start")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
     ])
 
@@ -3175,17 +3179,30 @@ def _broadcast_preview_text(data: dict) -> str:
     btn_url = data.get("broadcast_btn_url", "")
     btn_text = data.get("broadcast_btn_text", "")
     sub_count = data.get("broadcast_sub_count", 0)
+    b_ctype = data.get("broadcast_b_content_type", "")
 
     content_preview = ""
     if ctype == "photo":
-        content_preview = f"🖼 Фото" + (f" + подпись:\n{caption[:200]}" if caption else "")
+        content_preview = "🖼 Фото" + (f" + подпись:\n{caption[:200]}" if caption else "")
     else:
         content_preview = f"Текст:\n{text[:300]}{'…' if len(text) > 300 else ''}"
 
     btn_line = f"\n\n🔗 Кнопка: {btn_text} → {btn_url}" if btn_url else ""
+
+    ab_line = ""
+    if b_ctype:
+        b_text = data.get("broadcast_b_text", "")
+        b_caption = data.get("broadcast_b_caption", "")
+        if b_ctype == "photo":
+            b_preview = "🖼 Фото" + (f" + подпись:\n{b_caption[:100]}" if b_caption else "")
+        else:
+            b_preview = b_text[:150] + ("…" if len(b_text) > 150 else "")
+        ab_line = f"\n\n🧪 A/B тест — вариант B:\n{b_preview}"
+
+    a_label = "Вариант A:\n" if b_ctype else ""
     return (
         f"📢 Предпросмотр рассылки ({_format_num(sub_count)} подписч.)\n\n"
-        f"{content_preview}{btn_line}"
+        f"{a_label}{content_preview}{btn_line}{ab_line}"
     )
 
 
@@ -3236,7 +3253,7 @@ async def on_broadcast_content(message: Message, state: FSMContext) -> None:
     }
     await message.answer(
         _broadcast_preview_text(preview_data),
-        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=False),
+        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=False, has_ab=False),
     )
 
 
@@ -3257,9 +3274,10 @@ async def on_broadcast_url(message: Message, state: FSMContext) -> None:
     await state.set_state(BroadcastStates.confirming)
     data = await state.get_data()
     sub_count = data.get("broadcast_sub_count", 0)
+    has_ab = bool(data.get("broadcast_b_content_type"))
     await message.answer(
         _broadcast_preview_text(data),
-        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=bool(btn_url)),
+        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=bool(btn_url), has_ab=has_ab),
     )
 
 
@@ -3273,6 +3291,68 @@ async def cb_broadcast_add_btn(callback: CallbackQuery, state: FSMContext) -> No
         "• /skip — без кнопки"
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast:ab_start", BroadcastStates.confirming)
+async def cb_broadcast_ab_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BroadcastStates.waiting_variant_b)
+    if callback.message is not None:
+        await callback.message.answer(
+            "🧪 A/B тест — вариант B\n\n"
+            "Пришлите альтернативный текст или фото для второй половины подписчиков.\n"
+            "При отправке список будет разделён случайно 50/50.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:ab_cancel"),
+            ]]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast:ab_cancel", BroadcastStates.waiting_variant_b)
+async def cb_broadcast_ab_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BroadcastStates.confirming)
+    await callback.answer("Вариант B отменён")
+    data = await state.get_data()
+    sub_count = data.get("broadcast_sub_count", 0)
+    btn_url = data.get("broadcast_btn_url", "")
+    has_ab = bool(data.get("broadcast_b_content_type"))
+    if callback.message is not None:
+        await callback.message.answer(
+            _broadcast_preview_text(data),
+            reply_markup=_broadcast_confirm_kb(sub_count, has_btn=bool(btn_url), has_ab=has_ab),
+        )
+
+
+@router.message(BroadcastStates.waiting_variant_b, F.text | F.photo)
+async def on_broadcast_variant_b(message: Message, state: FSMContext) -> None:
+    if message.photo:
+        b_content_type = "photo"
+        b_photo_id = message.photo[-1].file_id
+        b_caption = (message.caption or "").strip()
+        b_text = ""
+    else:
+        b_text = (message.text or "").strip()
+        if not b_text:
+            await message.answer("Пустой текст. Пришлите сообщение или фото для варианта B.")
+            return
+        b_content_type = "text"
+        b_photo_id = None
+        b_caption = ""
+
+    await state.update_data(
+        broadcast_b_content_type=b_content_type,
+        broadcast_b_text=b_text,
+        broadcast_b_photo_id=b_photo_id,
+        broadcast_b_caption=b_caption,
+    )
+    await state.set_state(BroadcastStates.confirming)
+    data = await state.get_data()
+    sub_count = data.get("broadcast_sub_count", 0)
+    btn_url = data.get("broadcast_btn_url", "")
+    await message.answer(
+        _broadcast_preview_text(data),
+        reply_markup=_broadcast_confirm_kb(sub_count, has_btn=bool(btn_url), has_ab=True),
+    )
 
 
 @router.callback_query(F.data == "broadcast:do_send", BroadcastStates.confirming)
@@ -3292,8 +3372,12 @@ async def cb_broadcast_do_send(callback: CallbackQuery, state: FSMContext) -> No
         await callback.answer("Подписчиков не найдено", show_alert=True)
         return
 
+    b_ctype = data.get("broadcast_b_content_type", "")
+    is_ab = bool(b_ctype)
+
     await state.set_state(BroadcastStates.sending)
-    await callback.message.answer(f"⏳ Отправляю {_format_num(len(subscriber_ids))} подписчикам…")
+    ab_note = " (A/B тест, 50/50)" if is_ab else ""
+    await callback.message.answer(f"⏳ Отправляю {_format_num(len(subscriber_ids))} подписчикам{ab_note}…")
     await callback.answer()
 
     ctype = data.get("broadcast_content_type", "text")
@@ -3309,31 +3393,70 @@ async def cb_broadcast_do_send(callback: CallbackQuery, state: FSMContext) -> No
             InlineKeyboardButton(text=btn_text, url=btn_url)
         ]])
 
+    shuffled = list(subscriber_ids)
+    random.shuffle(shuffled)
+    if is_ab:
+        mid = len(shuffled) // 2
+        group_a = shuffled[:mid]
+        group_b = shuffled[mid:]
+        b_text = data.get("broadcast_b_text", "")
+        b_photo_id = data.get("broadcast_b_photo_id")
+        b_caption = data.get("broadcast_b_caption", "")
+    else:
+        group_a = shuffled
+        group_b = []
+
     broadcast_bot = Bot(token=bot_token)
-    sent = 0
-    failed = 0
+    sent_a = 0
+    failed_a = 0
+    sent_b = 0
+    failed_b = 0
     BATCH = 25
     try:
-        for i, tg_id in enumerate(subscriber_ids):
+        for i, tg_id in enumerate(group_a):
             try:
                 if ctype == "photo" and photo_id:
                     await broadcast_bot.send_photo(tg_id, photo=photo_id, caption=caption or None, reply_markup=reply_markup)
                 else:
                     await broadcast_bot.send_message(tg_id, text, reply_markup=reply_markup)
-                sent += 1
+                sent_a += 1
             except Exception:
-                failed += 1
+                failed_a += 1
             if (i + 1) % BATCH == 0:
                 await asyncio.sleep(1)
+
+        if is_ab:
+            for i, tg_id in enumerate(group_b):
+                try:
+                    if b_ctype == "photo" and b_photo_id:
+                        await broadcast_bot.send_photo(tg_id, photo=b_photo_id, caption=b_caption or None)
+                    else:
+                        await broadcast_bot.send_message(tg_id, b_text)
+                    sent_b += 1
+                except Exception:
+                    failed_b += 1
+                if (i + 1) % BATCH == 0:
+                    await asyncio.sleep(1)
     finally:
         await broadcast_bot.session.close()
 
     await state.clear()
-    await callback.message.answer(
-        f"✅ Рассылка завершена.\n"
-        f"• Доставлено: {_format_num(sent)}\n"
-        f"• Ошибок (бот заблокирован/не найден): {_format_num(failed)}"
-    )
+    if is_ab:
+        await callback.message.answer(
+            f"✅ A/B рассылка завершена.\n\n"
+            f"Вариант A ({_format_num(len(group_a))} чел.):\n"
+            f"• Доставлено: {_format_num(sent_a)}\n"
+            f"• Ошибок: {_format_num(failed_a)}\n\n"
+            f"Вариант B ({_format_num(len(group_b))} чел.):\n"
+            f"• Доставлено: {_format_num(sent_b)}\n"
+            f"• Ошибок: {_format_num(failed_b)}"
+        )
+    else:
+        await callback.message.answer(
+            f"✅ Рассылка завершена.\n"
+            f"• Доставлено: {_format_num(sent_a)}\n"
+            f"• Ошибок (бот заблокирован/не найден): {_format_num(failed_a)}"
+        )
 
 
 # ---------------------------------------------------------------------------
