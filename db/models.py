@@ -252,6 +252,8 @@ class ScheduledBroadcast(Base):
     send_at = Column(DateTime(timezone=True), nullable=False, index=True)
     # pending | sent | failed
     status = Column(String(16), nullable=False, default="pending")
+    # null = all subscribers; set = filter by segment
+    segment = Column(String(64), nullable=True)
     sent_count = Column(Integer, nullable=False, default=0)
     failed_count = Column(Integer, nullable=False, default=0)
 

@@ -209,6 +209,26 @@ async def get_bot_by_id(bot_id: int, client_id: int) -> BotConfig | None:
         return bot
 
 
+async def get_all_deployed_bots() -> list[dict[str, Any]]:
+    """Return id/name/owner telegram_id for all active, non-paused, non-merged
+    Telegram bots. Used by the health-check scheduler."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(BotConfig.id, BotConfig.bot_name, Client.telegram_id)
+            .join(Client, Client.id == BotConfig.client_id)
+            .where(
+                BotConfig.is_active == True,
+                BotConfig.status != "paused",
+                BotConfig.merged_into == None,
+                BotConfig.platform == "telegram",
+            )
+        )
+        return [
+            {"bot_id": r.id, "bot_name": r.bot_name, "owner_tg": r.telegram_id}
+            for r in result.all()
+        ]
+
+
 async def get_bot_by_id_any(bot_id: int) -> BotConfig | None:
     """Fetch a bot by PK without ownership check. Used by infrastructure
     callers (deployer, migration scripts) that already know the bot_id
@@ -1749,7 +1769,11 @@ async def get_deep_analytics(bot_id: int, client_id: int) -> dict | None:
 # ---------------------------------------------------------------------------
 
 async def create_scheduled_broadcast(
-    bot_id: int, client_id: int, message_text: str, send_at: datetime
+    bot_id: int,
+    client_id: int,
+    message_text: str,
+    send_at: datetime,
+    segment: str | None = None,
 ) -> ScheduledBroadcast:
     async with get_session() as session:
         row = ScheduledBroadcast(
@@ -1757,6 +1781,7 @@ async def create_scheduled_broadcast(
             client_id=client_id,
             message_text=message_text,
             send_at=send_at,
+            segment=segment,
             status="pending",
         )
         session.add(row)

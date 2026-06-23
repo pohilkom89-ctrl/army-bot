@@ -364,6 +364,7 @@ class TemplateStates(StatesGroup):
 
 
 class ScheduledBroadcastStates(StatesGroup):
+    choosing_segment = State()
     waiting_text = State()
     waiting_time = State()
 
@@ -3836,15 +3837,36 @@ async def cb_schedule_new(callback: CallbackQuery, state: FSMContext) -> None:
     if sub_count == 0:
         await callback.answer("У бота нет подписчиков", show_alert=True)
         return
-    await state.set_state(ScheduledBroadcastStates.waiting_text)
-    await state.update_data(sched_bot_id=bot_id, sched_client_id=client.id)
-    if callback.message is not None:
-        await callback.message.answer(
-            f"📝 Введите текст рассылки для бота «{bot_cfg.bot_name}» ({_format_num(sub_count)} подписчиков):",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="❌ Отмена", callback_data="sched:cancel_flow"),
-            ]]),
-        )
+
+    segments = await get_segments_for_bot(bot_id)
+    await state.update_data(sched_bot_id=bot_id, sched_client_id=client.id, sched_segment=None)
+
+    if segments:
+        await state.set_state(ScheduledBroadcastStates.choosing_segment)
+        rows = [[InlineKeyboardButton(
+            text=f"👥 Все подписчики ({_format_num(sub_count)})",
+            callback_data="sched:seg:all",
+        )]]
+        for seg in segments:
+            rows.append([InlineKeyboardButton(
+                text=f"🏷 {seg['segment']} ({_format_num(seg['count'])})",
+                callback_data=f"sched:seg:{seg['segment']}",
+            )])
+        rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="sched:cancel_flow")])
+        if callback.message is not None:
+            await callback.message.answer(
+                f"📅 Запланировать рассылку «{bot_cfg.bot_name}»\nКому отправить?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+    else:
+        await state.set_state(ScheduledBroadcastStates.waiting_text)
+        if callback.message is not None:
+            await callback.message.answer(
+                f"📝 Введите текст рассылки для бота «{bot_cfg.bot_name}» ({_format_num(sub_count)} подписчиков):",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="sched:cancel_flow"),
+                ]]),
+            )
     await callback.answer()
 
 
@@ -3854,6 +3876,30 @@ async def cb_schedule_cancel_flow(callback: CallbackQuery, state: FSMContext) ->
     await callback.answer("Отменено")
     if callback.message is not None:
         await callback.message.answer("Создание рассылки отменено. /mybots")
+
+
+@router.callback_query(F.data.startswith("sched:seg:"), ScheduledBroadcastStates.choosing_segment)
+async def cb_sched_choose_segment(callback: CallbackQuery, state: FSMContext) -> None:
+    raw = callback.data[len("sched:seg:"):]
+    segment: str | None = None if raw == "all" else raw
+    data = await state.get_data()
+    bot_id = data.get("sched_bot_id")
+    if not bot_id:
+        await state.clear()
+        await callback.answer("Сессия потеряна", show_alert=True)
+        return
+    sub_count = len(await get_subscriber_ids_by_segment(bot_id, segment))
+    await state.update_data(sched_segment=segment)
+    await state.set_state(ScheduledBroadcastStates.waiting_text)
+    seg_label = f"сегмент «{segment}»" if segment else "все подписчики"
+    if callback.message is not None:
+        await callback.message.answer(
+            f"📝 {seg_label.capitalize()} — {_format_num(sub_count)} чел.\nВведите текст рассылки:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="sched:cancel_flow"),
+            ]]),
+        )
+    await callback.answer()
 
 
 @router.message(ScheduledBroadcastStates.waiting_text)
@@ -3894,12 +3940,13 @@ async def on_schedule_time(message: Message, state: FSMContext) -> None:
     bot_id = data.get("sched_bot_id")
     client_id = data.get("sched_client_id")
     sched_text = data.get("sched_text", "")
+    sched_segment = data.get("sched_segment")
     if not bot_id or not client_id:
         await state.clear()
         await message.answer("Сессия потеряна. /mybots чтобы начать заново.")
         return
 
-    await create_scheduled_broadcast(bot_id, client_id, sched_text, send_at_utc)
+    await create_scheduled_broadcast(bot_id, client_id, sched_text, send_at_utc, segment=sched_segment)
     await state.clear()
 
     send_msk = send_at_utc.astimezone(_MOSCOW_TZ)
