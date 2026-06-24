@@ -2066,3 +2066,10 @@ async def get_bot_recent_conversations(
         }
         for r in rows
     ]
+
+
+async def save_miniapp_url(bot_id: int, url: str) -> None:
+    async with get_session() as session:
+        await session.execute(
+            update(BotConfig).where(BotConfig.id == bot_id).values(miniapp_url=url)
+        )

@@ -23,6 +23,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from aiogram.utils.token import TokenValidationError, validate_token
 from loguru import logger
@@ -122,6 +123,7 @@ from db.repository import (
     set_agency_flag,
     find_client_by_telegram_id,
     get_agency_sub_clients,
+    save_miniapp_url,
 )
 from managed_bots import (
     delete_managed_bot as _delete_managed_bot,
@@ -152,6 +154,25 @@ from services.rag import (
 from settings import settings
 from templates.bot_questionnaires import QUESTIONNAIRES, is_sensitive_question
 from webhook_server import start_webhook_server
+from miniapp.generator import ACCENT_PRESETS, accent_label, is_valid_hex, resolve_accent, generate_miniapp_html
+from miniapp.uploader import save_logo, save_miniapp_html
+
+async def _generate_miniapp(bot_cfg: "BotConfig") -> str | None:
+    """Generate HTML minisite, write to disk, save URL to DB. Returns URL or None."""
+    try:
+        config = bot_cfg.config_json or {}
+        # support both old "miniapp_theme" key and new "miniapp_accent"
+        accent = config.get("miniapp_accent") or config.get("miniapp_theme", "orange")
+        logo_url = config.get("miniapp_logo")
+        html_content = await generate_miniapp_html(bot_cfg, accent=accent, logo_url=logo_url)
+        url = await asyncio.to_thread(save_miniapp_html, bot_cfg.id, html_content)
+        await save_miniapp_url(bot_cfg.id, url)
+        logger.info("miniapp: generated bot_id={} accent={} url={}", bot_cfg.id, accent, url)
+        return url
+    except Exception:
+        logger.exception("miniapp: generation failed for bot_id={}", bot_cfg.id)
+        return None
+
 
 def _build_consent_text() -> str:
     parts = [
@@ -1326,6 +1347,12 @@ async def _run_pipeline_core(
                 InlineKeyboardButton(
                     text="🤖 Карточка бота",
                     callback_data=f"post_create:mybots:{saved_bot.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🌐 Создать Mini App",
+                    callback_data=f"miniapp:setup:{saved_bot.id}",
                 )
             ],
         ]
@@ -5989,6 +6016,357 @@ def _is_image_request(text: str) -> bool:
     return any(trigger in lower for trigger in IMAGE_TRIGGERS)
 
 
+def _miniapp_color_kb(bot_id: int) -> InlineKeyboardMarkup:
+    """Colour picker: 12 presets in 2-column grid + custom hex button."""
+    presets = list(ACCENT_PRESETS.items())
+    rows = []
+    for i in range(0, len(presets), 2):
+        row = []
+        for key, info in presets[i:i + 2]:
+            row.append(InlineKeyboardButton(
+                text=info["label"],
+                callback_data=f"miniapp:color:{bot_id}:{key}",
+            ))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(
+        text="✏️ Свой цвет (#RRGGBB)",
+        callback_data=f"miniapp:color:{bot_id}:custom",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _miniapp_logo_kb(bot_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"miniapp:skip_logo:{bot_id}"),
+    ]])
+
+
+async def _show_miniapp_card(send_fn, bot_cfg) -> None:
+    """Show management card for an existing Mini App."""
+    url = bot_cfg.miniapp_url
+    config = bot_cfg.config_json or {}
+    accent_val = config.get("miniapp_accent") or config.get("miniapp_theme", "orange")
+    lbl = accent_label(accent_val)
+    has_logo = bool(config.get("miniapp_logo"))
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Открыть Mini App", web_app=WebAppInfo(url=url))],
+            [InlineKeyboardButton(text=f"🎨 Цвет: {lbl}", callback_data=f"miniapp:change_color:{bot_cfg.id}")],
+            [InlineKeyboardButton(
+                text="🖼 Изменить логотип" if has_logo else "🖼 Добавить логотип",
+                callback_data=f"miniapp:change_logo:{bot_cfg.id}",
+            )],
+            [InlineKeyboardButton(text="🔄 Пересоздать", callback_data=f"miniapp:regen:{bot_cfg.id}")],
+        ]
+    )
+    acc_hex = resolve_accent(accent_val)
+    await send_fn(
+        f"🌐 <b>Mini App</b> — {bot_cfg.bot_name}\n\n"
+        f"Цвет: {lbl} <code>{acc_hex}</code>  |  Логотип: {'✅' if has_logo else '—'}\n\n"
+        f"<code>{url}</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+async def _start_miniapp_wizard(send_fn, bot_id: int, state: FSMContext) -> None:
+    """Begin setup wizard: ask colour."""
+    await state.set_state(MiniAppSetupStates.ask_color)
+    await state.update_data(miniapp_bot_id=bot_id)
+    await send_fn(
+        "🎨 <b>Шаг 1/2 — Выберите цвет акцента</b>\n\n"
+        "Это цвет кнопок, вкладок и заголовков вашей страницы.\n"
+        "Выберите из палитры или введите любой свой HEX-цвет.",
+        reply_markup=_miniapp_color_kb(bot_id),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("miniapp"))
+async def cmd_miniapp(message: Message, state: FSMContext) -> None:
+    if not await _require_consent(message):
+        return
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bots = await get_client_bots(client.id)
+    active = [b for b in bots if b.is_active and not b.merged_into]
+    if not active:
+        await message.answer("У вас нет активных ботов. Создайте бот через /newbot.")
+        return
+    if len(active) == 1:
+        bot = active[0]
+        if bot.miniapp_url:
+            await _show_miniapp_card(message.answer, bot)
+        else:
+            await _start_miniapp_wizard(message.answer, bot.id, state)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=b.bot_name, callback_data=f"miniapp:show:{b.id}")]
+            for b in active
+        ]
+    )
+    await message.answer("Выберите бот:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("miniapp:show:"))
+async def cb_miniapp_show(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    if callback.message is not None:
+        if bot_cfg.miniapp_url:
+            await _show_miniapp_card(callback.message.answer, bot_cfg)
+        else:
+            await _start_miniapp_wizard(callback.message.answer, bot_id, state)
+    await callback.answer()
+
+
+# ── Setup wizard: нажали "🌐 Создать Mini App" в post-create keyboard ──
+
+@router.callback_query(F.data.startswith("miniapp:setup:"))
+async def cb_miniapp_setup(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    if callback.message is not None:
+        await _start_miniapp_wizard(callback.message.answer, bot_id, state)
+    await callback.answer()
+
+
+async def _proceed_to_logo(callback_or_message, bot_id: int, accent_val: str, state: FSMContext) -> None:
+    """After colour chosen — ask for logo."""
+    await state.set_state(MiniAppSetupStates.ask_logo)
+    await state.update_data(miniapp_bot_id=bot_id, miniapp_accent=accent_val)
+    lbl = accent_label(accent_val)
+    acc_hex = resolve_accent(accent_val)
+    send = (
+        callback_or_message.answer
+        if hasattr(callback_or_message, "answer")
+        else callback_or_message.message.answer
+    )
+    await send(
+        f"✅ Цвет: {lbl} <code>{acc_hex}</code>\n\n"
+        "🖼 <b>Шаг 2/2 — Логотип</b>\n\n"
+        "Отправьте фото логотипа (показывается кружком в шапке) "
+        "или нажмите «Пропустить» — будет показан emoji.",
+        reply_markup=_miniapp_logo_kb(bot_id),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("miniapp:color:"))
+async def cb_miniapp_color(callback: CallbackQuery, state: FSMContext) -> None:
+    """User picked a colour from the palette grid."""
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    parts = (callback.data or "").split(":")
+    # miniapp:color:{bot_id}:{key_or_custom}
+    try:
+        bot_id = int(parts[2])
+        choice = parts[3]
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+
+    if choice == "custom":
+        await state.set_state(MiniAppSetupStates.ask_custom_color)
+        await state.update_data(miniapp_bot_id=bot_id)
+        await callback.answer()
+        if callback.message is not None:
+            await callback.message.answer(
+                "✏️ Введите HEX-цвет в формате <code>#RRGGBB</code>\n\n"
+                "Например: <code>#FF5733</code> или <code>#1a73e8</code>\n\n"
+                "Подобрать цвет: <a href=\"https://colorpicker.me\">colorpicker.me</a>",
+                parse_mode="HTML",
+            )
+        return
+
+    if choice not in ACCENT_PRESETS:
+        await callback.answer("Неизвестный цвет", show_alert=True)
+        return
+
+    await callback.answer(f"Выбран: {ACCENT_PRESETS[choice]['label']}")
+    await _proceed_to_logo(callback, bot_id, choice, state)
+
+
+@router.message(MiniAppSetupStates.ask_custom_color, F.text)
+async def on_miniapp_custom_color(message: Message, state: FSMContext) -> None:
+    """User typed a custom hex colour."""
+    raw = (message.text or "").strip()
+    hex_val = raw if raw.startswith("#") else f"#{raw}"
+    if not is_valid_hex(hex_val):
+        await message.answer(
+            "❌ Неверный формат. Введите цвет в виде <code>#RRGGBB</code>, например <code>#FF5733</code>",
+            parse_mode="HTML",
+        )
+        return
+    data = await state.get_data()
+    bot_id: int = data.get("miniapp_bot_id", 0)
+    await _proceed_to_logo(message, bot_id, hex_val.upper(), state)
+
+
+@router.message(MiniAppSetupStates.ask_logo, F.photo)
+async def on_miniapp_logo(message: Message, state: FSMContext, bot: "Bot") -> None:
+    data = await state.get_data()
+    bot_id: int = data.get("miniapp_bot_id", 0)
+    accent_val: str = data.get("miniapp_accent", "orange")
+    await state.clear()
+
+    user = message.from_user
+    if user is None:
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await message.answer("Бот не найден.")
+        return
+
+    await message.answer("⏳ Сохраняю логотип и создаю Mini App...")
+
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    photo_bytes = await bot.download_file(file.file_path)
+    logo_filename = await asyncio.to_thread(save_logo, bot_id, photo_bytes.read())
+
+    await update_bot_config(bot_id, client.id, "miniapp_accent", accent_val)
+    await update_bot_config(bot_id, client.id, "miniapp_logo", logo_filename)
+
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    url = await _generate_miniapp(bot_cfg)
+    if url and bot_cfg:
+        bot_cfg.miniapp_url = url
+        await _show_miniapp_card(message.answer, bot_cfg)
+    else:
+        await message.answer("⚠️ Не удалось создать Mini App. Попробуйте /miniapp позже.")
+
+
+@router.callback_query(F.data.startswith("miniapp:skip_logo:"))
+async def cb_miniapp_skip_logo(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    data = await state.get_data()
+    bot_id: int = data.get("miniapp_bot_id", 0)
+    accent_val: str = data.get("miniapp_accent", "orange")
+    await state.clear()
+
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+
+    await callback.answer("Создаю Mini App...")
+    await update_bot_config(bot_id, client.id, "miniapp_accent", accent_val)
+
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    url = await _generate_miniapp(bot_cfg)
+    if callback.message is not None:
+        if url and bot_cfg:
+            bot_cfg.miniapp_url = url
+            await _show_miniapp_card(callback.message.answer, bot_cfg)
+        else:
+            await callback.message.answer("⚠️ Не удалось создать Mini App.")
+
+
+# ── Management: change colour / logo for existing miniapp ──
+
+@router.callback_query(F.data.startswith("miniapp:change_color:"))
+async def cb_miniapp_change_color(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    if callback.message is not None:
+        await _start_miniapp_wizard(callback.message.answer, bot_id, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("miniapp:change_logo:"))
+async def cb_miniapp_change_logo(callback: CallbackQuery, state: FSMContext) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    config = bot_cfg.config_json or {}
+    accent_val = config.get("miniapp_accent") or config.get("miniapp_theme", "orange")
+
+    await state.set_state(MiniAppSetupStates.ask_logo)
+    await state.update_data(miniapp_bot_id=bot_id, miniapp_accent=accent_val)
+    if callback.message is not None:
+        await callback.message.answer(
+            "🖼 Отправьте новый логотип или нажмите «Пропустить» чтобы убрать текущий.",
+            reply_markup=_miniapp_logo_kb(bot_id),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("miniapp:regen:"))
+async def cb_miniapp_regen(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None:
+        await callback.answer()
+        return
+    try:
+        bot_id = int((callback.data or "").split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    bot_cfg = await get_bot_by_id(bot_id, client.id)
+    if bot_cfg is None:
+        await callback.answer("Бот не найден", show_alert=True)
+        return
+    await callback.answer("Пересоздаю...")
+    url = await _generate_miniapp(bot_cfg)
+    if callback.message is None:
+        return
+    if url and bot_cfg:
+        bot_cfg.miniapp_url = url
+        await _show_miniapp_card(callback.message.answer, bot_cfg)
+    else:
+        await callback.message.answer("⚠️ Не удалось обновить Mini App.")
+
+
 @router.message(Command("image"))
 async def cmd_image(message: Message, state: FSMContext) -> None:
     if not await _require_consent(message):
@@ -6720,6 +7098,12 @@ async def cmd_my_clients(message: Message) -> None:
 class LibraryStates(StatesGroup):
     choose_type = State()
     uploading = State()
+
+
+class MiniAppSetupStates(StatesGroup):
+    ask_color = State()
+    ask_custom_color = State()
+    ask_logo = State()
 
 
 @router.message(Command("library"))

@@ -88,6 +88,8 @@ class BotConfig(Base):
     # active | paused — управляется клиентом через /mybots (is_active остаётся
     # булевым soft-delete-флагом, status отражает runtime-состояние).
     status = Column(String(32), nullable=False, default="active")
+    # Public minisite URL: https://armybots.ru/apps/{id}/
+    miniapp_url = Column(String(512), nullable=True)
     # Set to the merged bot's id when this bot is absorbed by /merge_bots.
     # Bots with merged_into != NULL are hidden from /mybots and don't count
     # against bots_limit.
