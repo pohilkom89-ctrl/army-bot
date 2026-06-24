@@ -1336,30 +1336,27 @@ async def _run_pipeline_core(
             "intake: deploy failed for bot_id={} platform={}", saved_bot.id, platform
         )
 
+    sub = await get_active_subscription(client.id)
+    cur_tier = sub.tier if (sub and sub.status == "active") else "starter"
+    miniapp_btn = (
+        InlineKeyboardButton(
+            text="🌐 Создать Mini App",
+            callback_data=f"miniapp:setup:{saved_bot.id}",
+        )
+        if cur_tier != "starter"
+        else InlineKeyboardButton(
+            text="🔒 Mini App — доступен с Pro",
+            callback_data="miniapp:locked",
+        )
+    )
     post_create_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💬 Начать чат", callback_data="post_create:chat"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🤖 Карточка бота",
-                    callback_data=f"post_create:mybots:{saved_bot.id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🌐 Создать Mini App",
-                    callback_data=f"miniapp:setup:{saved_bot.id}",
-                )
-            ],
+            [InlineKeyboardButton(text="💬 Начать чат", callback_data="post_create:chat")],
+            [InlineKeyboardButton(text="🤖 Карточка бота", callback_data=f"post_create:mybots:{saved_bot.id}")],
+            [miniapp_btn],
         ]
     )
     platform_label = "VK" if platform == "vk" else ("MAX" if platform == "max" else "Telegram")
-    sub = await get_active_subscription(client.id)
-    cur_tier = sub.tier if (sub and sub.status == "active") else "starter"
     if deploy_ok:
         first_bot_header = (
             "🎉 Шаг 3 из 3 — готово! Ваш первый бот запущен!\n\n"
@@ -1922,7 +1919,7 @@ async def cb_limit_alerts(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-_TIER_ORDER = ("starter", "pro", "business")
+_TIER_ORDER = ("starter", "pro", "business", "agency")
 
 
 def _subscribe_keyboard() -> InlineKeyboardMarkup:
@@ -4833,6 +4830,8 @@ async def _check_bots_limit(
         combo_limit = plan["combo_bots_limit"]
         simple_count = await count_simple_bots(client_id)
         combo_count = await count_combo_bots(client_id)
+        if simple_limit is None or combo_limit is None:
+            return True, plan["name"], simple_count + combo_count, 0
         allowed = simple_count < simple_limit or combo_count < combo_limit
         return allowed, plan["name"], simple_count + combo_count, simple_limit + combo_limit
 
@@ -4842,6 +4841,8 @@ async def _check_bots_limit(
     else:
         limit = plan["simple_bots_limit"]
         count = await count_simple_bots(client_id)
+    if limit is None:
+        return True, plan["name"], count, 0
     return count < limit, plan["name"], count, limit
 
 
@@ -6083,6 +6084,14 @@ async def _start_miniapp_wizard(send_fn, bot_id: int, state: FSMContext) -> None
     )
 
 
+@router.callback_query(F.data == "miniapp:locked")
+async def cb_miniapp_locked(callback: CallbackQuery) -> None:
+    await callback.answer(
+        "Mini App доступен с тарифа Pro. Используйте /subscribe для перехода.",
+        show_alert=True,
+    )
+
+
 @router.message(Command("miniapp"))
 async def cmd_miniapp(message: Message, state: FSMContext) -> None:
     if not await _require_consent(message):
@@ -6091,6 +6100,17 @@ async def cmd_miniapp(message: Message, state: FSMContext) -> None:
     if user is None:
         return
     client = await get_or_create_client(user.id, user.username)
+    sub = await get_active_subscription(client.id)
+    tier = sub.tier if (sub and sub.status == "active") else "starter"
+    if tier == "starter":
+        await message.answer(
+            "🔒 *Mini App доступен с тарифа Pro.*\n\n"
+            "Публичная страница бота с выбором цвета и логотипом — "
+            "открывается прямо в Telegram.\n\n"
+            "Перейдите на Pro → /subscribe",
+            parse_mode="Markdown",
+        )
+        return
     bots = await get_client_bots(client.id)
     active = [b for b in bots if b.is_active and not b.merged_into]
     if not active:
@@ -6148,6 +6168,15 @@ async def cb_miniapp_setup(callback: CallbackQuery, state: FSMContext) -> None:
         bot_id = int((callback.data or "").split(":")[2])
     except (IndexError, ValueError):
         await callback.answer("Ошибка", show_alert=True)
+        return
+    client = await get_or_create_client(user.id, user.username)
+    sub = await get_active_subscription(client.id)
+    tier = sub.tier if (sub and sub.status == "active") else "starter"
+    if tier == "starter":
+        await callback.answer(
+            "Mini App доступен с тарифа Pro. Используйте /subscribe для перехода.",
+            show_alert=True,
+        )
         return
     if callback.message is not None:
         await _start_miniapp_wizard(callback.message.answer, bot_id, state)

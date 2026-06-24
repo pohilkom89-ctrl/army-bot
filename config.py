@@ -66,6 +66,17 @@ PLANS: dict[str, dict[str, Any]] = {
         "multitype_limit": 3,
         "description": "5 простых + 3 комбо-бота, безлимит токенов",
     },
+    "agency": {
+        "name": "Агентство",
+        "price_monthly": 9900,
+        "price_yearly": 95000,
+        "simple_bots_limit": None,  # unlimited
+        "combo_bots_limit": None,   # unlimited
+        "tokens_limit": None,       # unlimited
+        "merge_limit": 20,
+        "multitype_limit": 5,
+        "description": "Безлимит ботов, white-label, суб-аккаунты клиентов",
+    },
 }
 
 # Soft token cap for Business tier (tokens/month). At this threshold new
