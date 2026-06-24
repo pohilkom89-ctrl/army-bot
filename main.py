@@ -45,6 +45,8 @@ from deployer import (
     prepare_max_bot_files,
     prepare_lms_bot_files,
     write_bot_course,
+    prepare_marketplace_bot_files,
+    deploy_marketplace_bot,
     remove_bot,
     stop_bot,
     write_bot_greeting,
@@ -1268,6 +1270,8 @@ async def _run_pipeline_core(
             prepare_max_bot_files(saved_bot.id, spec.system_prompt)
         elif saved_bot.bot_type == "lms":
             prepare_lms_bot_files(saved_bot.id, spec.system_prompt)
+        elif saved_bot.bot_type == "marketplace":
+            prepare_marketplace_bot_files(saved_bot.id, spec.system_prompt)
         else:
             # Files live under bots/{bot_id}/ so multiple bots per client don't
             # collide; deployer uses the same path.
@@ -1301,6 +1305,8 @@ async def _run_pipeline_core(
             await deploy_max_bot(saved_bot.id)
         elif saved_bot.bot_type == "lms":
             await deploy_lms_bot(saved_bot.id)
+        elif saved_bot.bot_type == "marketplace":
+            await deploy_marketplace_bot(saved_bot.id)
         else:
             await deploy_bot(saved_bot.id)
         deploy_ok = True
@@ -2843,6 +2849,14 @@ def _bot_detail_keyboard(bot) -> InlineKeyboardMarkup:
                     callback_data=f"bot:lms_course:{bot.id}",
                 )]]
                 if getattr(bot, "bot_type", "") == "lms"
+                else []
+            ),
+            *(
+                [[InlineKeyboardButton(
+                    text="📊 Инструменты продавца",
+                    url=f"https://t.me/{(bot.bot_username or '').lstrip('@')}?start=menu",
+                )]]
+                if getattr(bot, "bot_type", "") == "marketplace" and bot.bot_username
                 else []
             ),
             [
@@ -4499,6 +4513,8 @@ async def cb_bot_resume(callback: CallbackQuery) -> None:
             await deploy_max_bot(bot_id)
         elif getattr(bot_cfg, "bot_type", "") == "lms":
             await deploy_lms_bot(bot_id)
+        elif getattr(bot_cfg, "bot_type", "") == "marketplace":
+            await deploy_marketplace_bot(bot_id)
         else:
             await deploy_bot(bot_id)
     except Exception:
