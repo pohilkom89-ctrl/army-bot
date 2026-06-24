@@ -413,6 +413,12 @@ class ScheduledBroadcastStates(StatesGroup):
     waiting_time = State()
 
 
+class MiniAppSetupStates(StatesGroup):
+    ask_color = State()
+    ask_custom_color = State()
+    ask_logo = State()
+
+
 # Moscow UTC+3 — used for parsing user-supplied schedule times.
 _MOSCOW_TZ = timezone(timedelta(hours=3))
 
@@ -7127,12 +7133,6 @@ async def cmd_my_clients(message: Message) -> None:
 class LibraryStates(StatesGroup):
     choose_type = State()
     uploading = State()
-
-
-class MiniAppSetupStates(StatesGroup):
-    ask_color = State()
-    ask_custom_color = State()
-    ask_logo = State()
 
 
 @router.message(Command("library"))
