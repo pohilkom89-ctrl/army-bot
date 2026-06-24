@@ -263,6 +263,228 @@ async def _wb_get_sales(token: str, days: int = 30) -> list[dict]:
     return result if isinstance(result, list) else []
 
 
+async def _wb_get_new_sales(token: str, since: datetime) -> list[dict]:
+    """Get sales changed since `since` (uses flag=1 for incremental)."""
+    date_from = since.strftime("%Y-%m-%dT%H:%M:%S")
+    result = await _wb_get("sales", token, {"dateFrom": date_from, "flag": 1})
+    return result if isinstance(result, list) else []
+
+
+# ── Analytics helpers ────────────────────────────────────────────────────────
+
+def _compute_abc_map(sales: list[dict]) -> dict[int, tuple[str, float]]:
+    """Return {nm_id: ("A"|"B"|"C", share_pct)} based on revenue share."""
+    revenue: dict[int, float] = {}
+    for s in sales:
+        nid = s.get("nmId", 0)
+        revenue[nid] = revenue.get(nid, 0.0) + s.get("totalPrice", 0)
+    total = sum(revenue.values()) or 1
+    sorted_items = sorted(revenue.items(), key=lambda x: x[1], reverse=True)
+    result: dict[int, tuple[str, float]] = {}
+    cumulative = 0.0
+    for nid, rev in sorted_items:
+        pct = rev / total * 100
+        cumulative += pct
+        group = "A" if cumulative <= 80 else ("B" if cumulative <= 95 else "C")
+        result[nid] = (group, round(pct, 2))
+    return result
+
+
+def _compute_redemption_rates(
+    orders_90d: list[dict], sales_90d: list[dict]
+) -> dict[int, tuple[float, int, int]]:
+    """Return {nm_id: (rate_pct, sales_count, orders_count)} for last 90 days."""
+    order_counts: dict[int, int] = {}
+    for o in orders_90d:
+        if not o.get("isCancel", False):
+            nid = o.get("nmId", 0)
+            order_counts[nid] = order_counts.get(nid, 0) + 1
+    sale_counts: dict[int, int] = {}
+    for s in sales_90d:
+        if not s.get("isCancel", False):
+            nid = s.get("nmId", 0)
+            sale_counts[nid] = sale_counts.get(nid, 0) + 1
+    result: dict[int, tuple[float, int, int]] = {}
+    all_nids = set(order_counts) | set(sale_counts)
+    for nid in all_nids:
+        orders = order_counts.get(nid, 0)
+        sales = sale_counts.get(nid, 0)
+        rate = (sales / orders * 100) if orders else 0.0
+        result[nid] = (round(rate, 1), sales, orders)
+    return result
+
+
+def _compute_stock_days_map(
+    stocks: list[dict], sales_14d: list[dict]
+) -> dict[str, tuple[int, int]]:
+    """Return {barcode: (qty, days_left)} where days_left=-1 means no sales data."""
+    qty_map: dict[str, int] = {}
+    for s in stocks:
+        bc = str(s.get("barcode", ""))
+        qty_map[bc] = qty_map.get(bc, 0) + s.get("quantity", 0)
+    # avg daily sales per barcode
+    daily: dict[str, float] = {}
+    for s in sales_14d:
+        if not s.get("isCancel", False):
+            bc = str(s.get("barcode", ""))
+            daily[bc] = daily.get(bc, 0.0) + 1
+    for bc in daily:
+        daily[bc] /= 14
+    result: dict[str, tuple[int, int]] = {}
+    for bc, qty in qty_map.items():
+        d = daily.get(bc, 0)
+        days_left = int(qty / d) if d > 0 else -1
+        result[bc] = (qty, days_left)
+    return result
+
+
+def _compute_in_transit(
+    orders_30d: list[dict], sales_30d: list[dict]
+) -> dict[int, tuple[int, int]]:
+    """Return {nm_id: (in_way_to_client, returns_in_way)}.
+    in_way_to_client = non-cancelled orders whose srid is not in confirmed sales.
+    returns_in_way   = cancelled orders from last 14 days (being returned)."""
+    sales_srids = {s.get("srid", "") for s in sales_30d if not s.get("isCancel")}
+    cutoff_returns = datetime.now(timezone.utc) - timedelta(days=14)
+    in_way: dict[int, int] = {}
+    returns: dict[int, int] = {}
+    for o in orders_30d:
+        nid = o.get("nmId", 0)
+        if o.get("isCancel", False):
+            # cancelled recently → return in transit
+            try:
+                odate = datetime.fromisoformat(o.get("date", "").replace("Z", "+00:00"))
+                if odate >= cutoff_returns:
+                    returns[nid] = returns.get(nid, 0) + 1
+            except Exception:
+                pass
+        elif o.get("srid", "") not in sales_srids:
+            in_way[nid] = in_way.get(nid, 0) + 1
+    all_nids = set(in_way) | set(returns)
+    return {nid: (in_way.get(nid, 0), returns.get(nid, 0)) for nid in all_nids}
+
+
+def _compute_daily_counts(
+    sales: list[dict],
+) -> dict[int, tuple[int, float, int]]:
+    """Return {nm_id: (today_count, today_revenue, yesterday_count)}."""
+    today = datetime.now(timezone.utc).date()
+    yesterday = today - timedelta(days=1)
+    today_c: dict[int, int] = {}
+    today_r: dict[int, float] = {}
+    yest_c: dict[int, int] = {}
+    for s in sales:
+        if s.get("isCancel"):
+            continue
+        nid = s.get("nmId", 0)
+        try:
+            d = datetime.fromisoformat(s.get("date", "").replace("Z", "+00:00")).date()
+        except Exception:
+            continue
+        price = s.get("totalPrice", 0)
+        if d == today:
+            today_c[nid] = today_c.get(nid, 0) + 1
+            today_r[nid] = today_r.get(nid, 0.0) + price
+        elif d == yesterday:
+            yest_c[nid] = yest_c.get(nid, 0) + 1
+    all_nids = set(today_c) | set(yest_c)
+    return {nid: (today_c.get(nid, 0), today_r.get(nid, 0.0), yest_c.get(nid, 0)) for nid in all_nids}
+
+
+def _commission_for_subject(subject: str) -> int:
+    """Map WB product subject (category) to commission %."""
+    s = subject.lower()
+    if any(k in s for k in ("одежд", "пальт", "куртк", "рубашк", "брюк", "плать")):
+        return WB_COMMISSIONS["clothing"]
+    if any(k in s for k in ("обувь", "ботинк", "кроссовк", "туфли", "сапог")):
+        return WB_COMMISSIONS["shoes"]
+    if any(k in s for k in ("электрон", "телефон", "ноутбук", "планшет", "наушник", "смарт")):
+        return WB_COMMISSIONS["electronics"]
+    if any(k in s for k in ("красот", "косметик", "парфюм", "уход", "витамин", "добавк", "пищев")):
+        return WB_COMMISSIONS["beauty"]
+    if any(k in s for k in ("игрушк", "детск")):
+        return WB_COMMISSIONS["toys"]
+    if any(k in s for k in ("спорт", "фитнес", "велосип")):
+        return WB_COMMISSIONS["sports"]
+    if any(k in s for k in ("авто", "мото", "шин")):
+        return WB_COMMISSIONS["auto"]
+    if any(k in s for k in ("еда", "продукт", "напиток", "кофе", "чай")):
+        return WB_COMMISSIONS["food"]
+    return WB_COMMISSIONS["other"]
+
+
+def _format_wb_sale_notification(
+    sale: dict,
+    abc_map: dict[int, tuple[str, float]],
+    redemption_rates: dict[int, tuple[float, int, int]],
+    stock_map: dict[str, tuple[int, int]],
+    in_transit: dict[int, tuple[int, int]],
+    daily_counts: dict[int, tuple[int, float, int]],
+    sale_num: int = 1,
+) -> str:
+    """Format a rich sale notification in competitor style."""
+    nid = sale.get("nmId", 0)
+    bc = str(sale.get("barcode", ""))
+    price = sale.get("totalPrice", 0)
+    discount_pct = sale.get("discountPercent", 0)
+    discount_amt = round(price * discount_pct / 100)
+    subject = sale.get("subject", "")
+    brand = sale.get("brand", "")
+    article = sale.get("supplierArticle", "")
+    warehouse = sale.get("warehouseName", "")
+    region = sale.get("regionName", "")
+    date_str = sale.get("date", "")
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        dt_label = dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        dt_label = date_str[:16]
+
+    abc_group, abc_share = abc_map.get(nid, ("—", 0.0))
+    abc_emoji = {"A": "🟩", "B": "🟨", "C": "🟥"}.get(abc_group, "⬜")
+
+    red_rate, red_sales, red_orders = redemption_rates.get(nid, (0.0, 0, 0))
+    stock_qty, stock_days = stock_map.get(bc, (0, -1))
+    stock_days_str = f"{stock_days} дн." if stock_days >= 0 else "н/д"
+
+    in_client, in_return = in_transit.get(nid, (0, 0))
+    today_c, today_r, yest_c = daily_counts.get(nid, (0, 0.0, 0))
+
+    commission = _commission_for_subject(subject)
+
+    lines = [
+        f"_{dt_label}_",
+        f"✅ *Выкуп [{sale_num}]: {price:,.0f}₽*",
+        f"📈 Сегодня: {today_c} на {today_r:,.0f}₽",
+        f"📉 Вчера таких: {yest_c}",
+        f"🆔 Арт: `{article}`",
+    ]
+    if subject:
+        lines.append(f"🪨 {subject}")
+    if brand:
+        lines.append(f"🏷 {brand}")
+    if discount_pct:
+        lines.append(f"🛍 WB скидка: {discount_amt}₽ ({discount_pct}%)")
+    if bc:
+        lines.append(f"🔢 Баркод: `{bc}`")
+    lines += [
+        f"{abc_emoji} АВС-анализ: {abc_group} ({abc_share:.2f}%)",
+        f"🎒 Комиссия (базовая): {commission}%",
+    ]
+    if red_orders > 0:
+        lines.append(f"💎 Выкуп за 3 мес: {red_rate:.0f}% ({red_sales}/{red_orders})")
+    if warehouse or region:
+        location = f"{warehouse} → {region}" if warehouse and region else warehouse or region
+        lines.append(f"🌐 {location}")
+    if in_client > 0:
+        lines.append(f"🚚 В пути до клиента: {in_client}")
+    if in_return > 0:
+        lines.append(f"🚛 В пути возвраты: {in_return}")
+    lines.append(f"📦 FBS: {stock_qty} шт. хватит на *{stock_days_str}*")
+
+    return "\n".join(lines)
+
+
 # ── Ozon API helpers ─────────────────────────────────────────────────────────
 async def _ozon_post(endpoint: str, client_id: str, api_key: str, body: dict) -> Optional[dict]:
     url = f"{OZON_BASE}{endpoint}"
@@ -1177,6 +1399,74 @@ async def _send_daily_digest() -> None:
             logger.exception("marketplace: daily digest failed uid={}", uid)
 
 
+# ── Real-time sale polling (every 5 min) ─────────────────────────────────────
+_last_sale_check: dict[int, datetime] = {}
+_notified_srids: dict[int, set] = {}
+
+
+async def _poll_and_notify() -> None:
+    """Poll WB API for new sales every 5 minutes and send rich notifications."""
+    for uid, cfg in list(_config.items()):
+        if not cfg.get("alerts_enabled", True):
+            continue
+        wb_key = cfg.get("wb_api_key")
+        if not wb_key:
+            continue
+        try:
+            now = datetime.now(timezone.utc)
+            last_check = _last_sale_check.get(uid, now - timedelta(minutes=6))
+            notified = _notified_srids.setdefault(uid, set())
+
+            new_sales = await _wb_get_new_sales(wb_key, last_check)
+            _last_sale_check[uid] = now
+
+            fresh = [
+                s for s in new_sales
+                if not s.get("isCancel", False) and s.get("srid", "") not in notified
+            ]
+            if not fresh:
+                continue
+
+            # Build analytics maps (reuse 90-day data)
+            sales_90d = await _wb_get_sales(wb_key, days=90)
+            orders_90d = await _wb_get_orders(wb_key, days=90)
+            stocks = await _wb_get_stocks(wb_key)
+            sales_14d = await _wb_get_sales(wb_key, days=14)
+
+            abc_map = _compute_abc_map(sales_90d)
+            redemption_rates = _compute_redemption_rates(orders_90d, sales_90d)
+            stock_map = _compute_stock_days_map(stocks, sales_14d)
+            in_transit = _compute_in_transit(orders_90d, sales_90d)
+            daily_counts = _compute_daily_counts(sales_90d)
+
+            # Group multiple sales of same SKU arriving together
+            by_nm: dict[int, list] = {}
+            for s in fresh:
+                nid = s.get("nmId", 0)
+                by_nm.setdefault(nid, []).append(s)
+
+            for nid, group_sales in by_nm.items():
+                representative = group_sales[0]
+                text = _format_wb_sale_notification(
+                    representative, abc_map, redemption_rates,
+                    stock_map, in_transit, daily_counts,
+                    sale_num=len(group_sales),
+                )
+                try:
+                    await bot.send_message(uid, text, parse_mode="Markdown")
+                except Exception:
+                    logger.exception("marketplace: notify send failed uid={}", uid)
+                for s in group_sales:
+                    notified.add(s.get("srid", ""))
+
+            # Keep notified set bounded (last 500 srids)
+            if len(notified) > 500:
+                _notified_srids[uid] = set(list(notified)[-500:])
+
+        except Exception:
+            logger.exception("marketplace: poll failed uid={}", uid)
+
+
 # ── Fallback: LLM for general questions ──────────────────────────────────────
 @dp.message()
 async def on_message(message: Message) -> None:
@@ -1213,6 +1503,7 @@ async def main() -> None:
     _load_config()
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(_send_daily_digest, "cron", hour=9, minute=0)
+    scheduler.add_job(_poll_and_notify, "interval", minutes=5, next_run_time=datetime.now())
     scheduler.start()
     logger.info("Marketplace bot starting")
     await dp.start_polling(bot)
